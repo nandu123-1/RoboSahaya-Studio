@@ -1,0 +1,47 @@
+{
+  "scenario_name": "tf_broken_camera_link",
+  "description": "TF lookup between base_link and camera_link fails due to disconnected transform tree",
+  "nodes": [
+    "/camera_driver",
+    "/robot_state_publisher"
+  ],
+  "topics": {
+    "/camera/image_raw": ["sensor_msgs/msg/Image"],
+    "/tf": ["tf2_msgs/msg/TFMessage"],
+    "/tf_static": ["tf2_msgs/msg/TFMessage"]
+  },
+  "endpoints": {
+    "/camera/image_raw": {
+      "topic": "/camera/image_raw",
+      "exists_in_graph": true,
+      "publishers": [
+        {
+          "node_name": "/camera_driver",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/Image",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE"
+          }
+        }
+      ],
+      "subscriptions": []
+    }
+  },
+  "parameters": {},
+  "tf_frames": [
+    "base_link",
+    "base_footprint",
+    "odom"
+  ],
+  "tf_lookups": {
+    "base_link->camera_link": {
+      "source_frame": "base_link",
+      "target_frame": "camera_link",
+      "transform_available": false,
+      "status": "error",
+      "error_message": "Frame 'camera_link' does not exist in the TF tree buffer."
+    }
+  },
+  "clock_active": false
+}

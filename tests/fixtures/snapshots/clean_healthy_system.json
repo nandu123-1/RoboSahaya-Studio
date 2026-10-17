@@ -1,0 +1,65 @@
+{
+  "scenario_name": "clean_healthy_system",
+  "description": "Healthy robot system with all nodes running, matching QoS, valid TF tree, and active sensor data",
+  "nodes": [
+    "/rplidar_node",
+    "/navigation_node",
+    "/robot_state_publisher",
+    "/diff_drive_controller"
+  ],
+  "topics": {
+    "/scan": ["sensor_msgs/msg/LaserScan"],
+    "/cmd_vel": ["geometry_msgs/msg/Twist"],
+    "/odom": ["nav_msgs/msg/Odometry"],
+    "/tf": ["tf2_msgs/msg/TFMessage"]
+  },
+  "endpoints": {
+    "/scan": {
+      "topic": "/scan",
+      "exists_in_graph": true,
+      "publishers": [
+        {
+          "node_name": "/rplidar_node",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE"
+          }
+        }
+      ],
+      "subscriptions": [
+        {
+          "node_name": "/navigation_node",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE"
+          }
+        }
+      ]
+    }
+  },
+  "parameters": {
+    "/navigation_node": {
+      "use_sim_time": false
+    },
+    "/rplidar_node": {
+      "use_sim_time": false
+    }
+  },
+  "tf_frames": [
+    "base_link",
+    "laser_frame",
+    "odom",
+    "base_footprint"
+  ],
+  "clock_active": false,
+  "samples": {
+    "/scan": {
+      "count": 50,
+      "snippet": "ranges=[0.82, 0.83, ...]"
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "scenario_name": "missing_laser_pub",
+  "description": "Topic /scan exists in graph with a subscriber, but zero publisher endpoints are active",
+  "nodes": [
+    "/navigation_node",
+    "/robot_state_publisher"
+  ],
+  "topics": {
+    "/scan": ["sensor_msgs/msg/LaserScan"],
+    "/cmd_vel": ["geometry_msgs/msg/Twist"],
+    "/tf": ["tf2_msgs/msg/TFMessage"]
+  },
+  "endpoints": {
+    "/scan": {
+      "topic": "/scan",
+      "exists_in_graph": true,
+      "publishers": [],
+      "subscriptions": [
+        {
+          "node_name": "/navigation_node",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE"
+          }
+        }
+      ]
+    }
+  },
+  "parameters": {
+    "/navigation_node": {
+      "use_sim_time": false
+    }
+  },
+  "tf_frames": [
+    "base_link",
+    "odom"
+  ],
+  "clock_active": false,
+  "samples": {
+    "/scan": {
+      "count": 0,
+      "snippet": null
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "scenario_name": "sim_time_divergence",
+  "description": "Simulation clock is active, but slam_toolbox node has use_sim_time=false while gazebo has true",
+  "nodes": [
+    "/gazebo",
+    "/slam_toolbox",
+    "/robot_state_publisher"
+  ],
+  "topics": {
+    "/clock": ["rosgraph_msgs/msg/Clock"],
+    "/scan": ["sensor_msgs/msg/LaserScan"],
+    "/tf": ["tf2_msgs/msg/TFMessage"]
+  },
+  "endpoints": {
+    "/scan": {
+      "topic": "/scan",
+      "exists_in_graph": true,
+      "publishers": [
+        {
+          "node_name": "/gazebo",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE"
+          }
+        }
+      ],
+      "subscriptions": [
+        {
+          "node_name": "/slam_toolbox",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE"
+          }
+        }
+      ]
+    }
+  },
+  "parameters": {
+    "/gazebo": {
+      "use_sim_time": true
+    },
+    "/slam_toolbox": {
+      "use_sim_time": false
+    },
+    "/robot_state_publisher": {
+      "use_sim_time": true
+    }
+  },
+  "tf_frames": [
+    "base_link",
+    "odom",
+    "map"
+  ],
+  "clock_active": true,
+  "samples": {
+    "/scan": {
+      "count": 20,
+      "snippet": "ranges=[...]"
+    }
+  }
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "case_id": "case_d_qos_reliability_mismatch",
+    "name": "LiDAR QoS Reliability Incompatibility",
+    "query_en": "My robot is moving, but no laser scan points appear in RViz.",
+    "query_te_en": "నా robot tirugutondi kani laser scan data ravatledu, why?",
+    "target_entity": "/scan",
+    "target_type": "topic",
+    "expected_case": "case_d_qos_reliability_mismatch",
+    "expected_observations": ["E1", "E2", "E3"],
+    "expected_command": "ros2 topic info /scan --verbose",
+    "analogy_keywords": ["walkie-talkie", "radio", "AM", "FM"]
+  },
+  {
+    "case_id": "case_a_missing_publisher",
+    "name": "Zero Publisher Endpoints Active",
+    "query_en": "Why is the scan topic not receiving any publisher data?",
+    "query_te_en": "slash can lo publishers enduku levu?",
+    "target_entity": "/scan",
+    "target_type": "topic",
+    "expected_case": "case_a_missing_publisher",
+    "expected_observations": ["E1", "E2"],
+    "expected_command": "ros2 node list",
+    "analogy_keywords": ["listeners", "hall", "speaker"]
+  },
+  {
+    "case_id": "case_c_tf_transform_failure",
+    "name": "Disconnected TF Coordinate Frame Link",
+    "query_en": "The camera frame transform is failing to link with base link.",
+    "query_te_en": "camera link transform base link tho connect avvatledu",
+    "target_entity": "camera_link",
+    "target_type": "frame",
+    "expected_case": "case_c_tf_transform_failure",
+    "expected_observations": ["E1"],
+    "expected_command": "ros2 run tf2_tools view_frames",
+    "analogy_keywords": ["skeleton", "shoulder", "elbow"]
+  },
+  {
+    "case_id": "case_e_sim_time_divergence",
+    "name": "Simulation Clock Time Discrepancy",
+    "query_en": "Getting time extrapolation errors in navigation simulation.",
+    "query_te_en": "navigation simulation lo time mismatch error vastondi",
+    "target_entity": "use_sim_time",
+    "target_type": "parameter",
+    "expected_case": "case_e_sim_time_divergence",
+    "expected_observations": ["E1", "E2"],
+    "expected_command": "ros2 param get /slam_toolbox use_sim_time",
+    "analogy_keywords": ["sprinters", "stopwatch", "wall-clock"]
+  },
+  {
+    "case_id": "clean_healthy_system",
+    "name": "Operational Healthy Robot",
+    "query_en": "Is the lidar scan topic healthy?",
+    "query_te_en": "scan topic lo messages vastunnaya?",
+    "target_entity": "/scan",
+    "target_type": "topic",
+    "expected_case": "healthy_topic",
+    "expected_observations": ["E1", "E2", "E4"],
+    "expected_command": "ros2 topic hz /scan",
+    "analogy_keywords": ["clear radio", "perfect reception"]
+  }
+]

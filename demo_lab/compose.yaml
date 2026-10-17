@@ -1,0 +1,17 @@
+services:
+  robosahaya-app:
+    build:
+      context: ..
+      dockerfile: demo_lab/Dockerfile
+    container_name: robosahaya-app
+    network_mode: host
+    environment:
+      - ROBOSAHAYA_MODE=mock
+      - ROBOSAHAYA_MOCK_SCENARIO=qos_reliability_mismatch
+      - ROS_DOMAIN_ID=0
+      - GNANI_API_KEY=${GNANI_API_KEY:-}
+      - HOST=0.0.0.0
+      - PORT=7860
+    ports:
+      - "7860:7860"
+    restart: unless-stopped

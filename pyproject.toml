@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robosahaya"
+version = "0.1.0"
+description = "Voice-first ROS 2 debugging copilot using Gnani AI Prisma and Timbre"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "RoboSahaya Team" }
+]
+dependencies = [
+    "pydantic>=2.0.0",
+    "gradio>=4.0.0",
+    "httpx>=0.25.0",
+    "rapidfuzz>=3.0.0",
+    "python-dotenv>=1.0.0",
+    "pytest>=7.0.0"
+]
+
+[project.scripts]
+robosahaya = "robosahaya.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

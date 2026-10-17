@@ -1,0 +1,68 @@
+{
+  "scenario_name": "qos_reliability_mismatch",
+  "description": "Sensor driver publishes with BEST_EFFORT, while navigation subscription requires RELIABLE",
+  "nodes": [
+    "/rplidar_node",
+    "/navigation_node",
+    "/robot_state_publisher"
+  ],
+  "topics": {
+    "/scan": ["sensor_msgs/msg/LaserScan"],
+    "/cmd_vel": ["geometry_msgs/msg/Twist"],
+    "/tf": ["tf2_msgs/msg/TFMessage"],
+    "/clock": ["rosgraph_msgs/msg/Clock"]
+  },
+  "endpoints": {
+    "/scan": {
+      "topic": "/scan",
+      "exists_in_graph": true,
+      "publishers": [
+        {
+          "node_name": "/rplidar_node",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE",
+            "history": "KEEP_LAST",
+            "depth": 10
+          }
+        }
+      ],
+      "subscriptions": [
+        {
+          "node_name": "/navigation_node",
+          "node_namespace": "/",
+          "topic_type": "sensor_msgs/msg/LaserScan",
+          "qos": {
+            "reliability": "RELIABLE",
+            "durability": "VOLATILE",
+            "history": "KEEP_LAST",
+            "depth": 10
+          }
+        }
+      ]
+    }
+  },
+  "parameters": {
+    "/navigation_node": {
+      "use_sim_time": true
+    },
+    "/rplidar_node": {
+      "use_sim_time": true
+    }
+  },
+  "tf_frames": [
+    "base_link",
+    "base_footprint",
+    "laser_frame",
+    "odom"
+  ],
+  "clock_active": true,
+  "samples": {
+    "/scan": {
+      "count": 10,
+      "snippet": "ranges=[0.54, 0.55, ...], angle_min=-3.14"
+    }
+  }
+}
