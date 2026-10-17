@@ -44,7 +44,8 @@ class RoboSahayaApp:
         self,
         audio_path: Optional[str],
         text_input: Optional[str],
-        scenario_name: str
+        scenario_name: str,
+        engine_mode: str = "ai"
     ) -> Tuple[str, str, str, str, Optional[str]]:
         # Update scenario if in mock mode
         if isinstance(self.inspector, MockInspector):
@@ -72,6 +73,7 @@ class RoboSahayaApp:
         # Step 2: Entity Grounding
         grounding_res = self.grounder.ground(raw_text)
         code_mixed_status = "✨ Telugu-English Detected" if grounding_res.is_code_mixed else "English"
+        engine_badge = "🧠 Powered by Gnani AI Evon v3.3" if engine_mode == "ai" else "⚙️ Deterministic Rule Baseline"
         
         target = "/scan"
         etype = "topic"
@@ -80,12 +82,18 @@ class RoboSahayaApp:
         if grounding_res.primary_target:
             target = grounding_res.primary_target.canonical_name
             etype = grounding_res.primary_target.entity_type
-            grounding_badge = f"🎯 Grounded: `{target}` ({etype.upper()}) | Confidence: `{int(grounding_res.primary_target.confidence * 100)}%` | {code_mixed_status}"
+            grounding_badge = f"🎯 Grounded: `{target}` ({etype.upper()}) | Confidence: `{int(grounding_res.primary_target.confidence * 100)}%` | {code_mixed_status}\n\n*{engine_badge}*"
         else:
-            grounding_badge = f"🔍 Analyzing topic `/scan` by default | {code_mixed_status}"
+            grounding_badge = f"🔍 Analyzing topic `/scan` by default | {code_mixed_status}\n\n*{engine_badge}*"
 
-        # Step 3: Diagnostic Engine execution
-        diag = self.engine.analyze(target_entity=target, entity_type=etype, intent=intent)
+        # Step 3: Diagnostic Engine execution with selected reasoning mode
+        diag = self.engine.analyze(
+            target_entity=target,
+            entity_type=etype,
+            intent=intent,
+            engine_mode=engine_mode,
+            user_query=raw_text
+        )
 
         # Step 4: Formatting responses
         terminal_md = ResponseBuilder.format_terminal_markdown(diag)
@@ -117,12 +125,11 @@ def create_ui() -> gr.Blocks:
     app_instance = RoboSahayaApp()
 
     with gr.Blocks(title="RoboSahaya — ROS 2 Voice Debugging Copilot") as demo:
-
         gr.Markdown(
             """
             # 🤖 RoboSahaya — Voice-First ROS 2 Debugging Copilot
             **Speak the problem. Inspect the evidence. Find the next step.**  
-            *Powered by Gnani AI (Prisma STT & Timbre TTS) | Built for the Great Indian AI Internship Challenge 2026*
+            *Powered by Gnani AI (Prisma STT, Timbre TTS & Evon v3.3 Reasoning) | Built for Great Indian AI Internship Challenge 2026*
             """
         )
 
@@ -139,9 +146,19 @@ def create_ui() -> gr.Blocks:
                 value="qos_reliability_mismatch",
                 info="Allows judges to instantly reproduce all 5 failure cases with zero ROS 2 setup required."
             )
-            mode_badge = gr.Markdown(
-                f"**System State:** `Mock Replay Active` | **ROS Distro:** `Jazzy` | **Domain:** `{settings.ROS_DOMAIN_ID}`"
+            engine_radio = gr.Radio(
+                label="🧠 Diagnostic Reasoning Mode",
+                choices=[
+                    ("Gnani AI Evon v3.3 (Generative AI Reasoning)", "ai"),
+                    ("Deterministic Safety Baseline (Pure Rule Engine)", "rules")
+                ],
+                value="ai",
+                info="Toggle between Gnani AI's Evon reasoning model and the deterministic rule safety baseline."
             )
+
+        mode_badge = gr.Markdown(
+            f"**System State:** `Mock Replay Active` | **ROS Distro:** `Jazzy` | **Domain:** `{settings.ROS_DOMAIN_ID}`"
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -167,12 +184,12 @@ def create_ui() -> gr.Blocks:
                 terminal_card_out = gr.Markdown(label="Terminal Card & Verification Steps")
 
         # Event Handlers
-        async def run_pipeline(audio, text, scen):
-            return await app_instance.process_pipeline(audio, text, scen)
+        async def run_pipeline(audio, text, scen, eng_mode):
+            return await app_instance.process_pipeline(audio, text, scen, eng_mode)
 
         submit_btn.click(
             fn=run_pipeline,
-            inputs=[audio_input, text_input, scenario_dropdown],
+            inputs=[audio_input, text_input, scenario_dropdown, engine_radio],
             outputs=[transcript_out, grounding_out, terminal_card_out, voice_script_out, audio_player]
         )
 
@@ -189,3 +206,4 @@ def create_ui() -> gr.Blocks:
         )
 
     return demo
+

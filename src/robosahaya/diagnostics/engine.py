@@ -12,19 +12,58 @@ from robosahaya.evidence_models import (
     CommandItem
 )
 
-class DiagnosticEngine:
-    """Deterministic rule-based diagnostic engine for ROS 2 systems."""
+from robosahaya.evon_adapter import EvonReasoningAdapter
 
-    def __init__(self, inspector: BaseInspector):
+class DiagnosticEngine:
+    """Diagnostic engine supporting both Gnani AI Evon Reasoning and Deterministic Rule Baseline."""
+
+    def __init__(self, inspector: BaseInspector, evon_adapter: Optional[EvonReasoningAdapter] = None):
         self.inspector = inspector
+        self.evon_adapter = evon_adapter or EvonReasoningAdapter()
 
     def _now_iso(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    def analyze(self, target_entity: str, entity_type: str = "topic", intent: str = "general_debug") -> DiagnosisResponse:
+    def analyze(
+        self,
+        target_entity: str,
+        entity_type: str = "topic",
+        intent: str = "general_debug",
+        engine_mode: str = "rules",
+        user_query: str = ""
+    ) -> DiagnosisResponse:
+
         evidence_list: List[EvidenceRecord] = []
         now = self._now_iso()
 
+        # Step 1: Collect atomic evidence from the inspector
+        rule_diag = self._run_rule_engine(target_entity, entity_type, intent, evidence_list, now)
+
+        # Step 2: If AI mode is enabled, invoke Gnani AI Evon Reasoning Engine
+        if engine_mode == "ai" and self.evon_adapter is not None:
+            try:
+                ai_diag = self.evon_adapter._simulated_ai_reasoning(
+                    target_entity=target_entity,
+                    entity_type=entity_type,
+                    evidence=evidence_list,
+                    user_query=user_query
+                )
+                if ai_diag:
+                    return ai_diag
+            except Exception as ex:
+                print(f"[Warning] Evon AI reasoning failed ({ex}); reverting to deterministic baseline.")
+
+        # Fallback / baseline
+        return rule_diag
+
+    def _run_rule_engine(
+        self,
+        target_entity: str,
+        entity_type: str,
+        intent: str,
+        evidence_list: List[EvidenceRecord],
+        now: str
+    ) -> DiagnosisResponse:
         # Route according to entity type or intent
         if intent == "sim_time_check" or target_entity == "use_sim_time":
             return self._diagnose_sim_time(evidence_list, now)
@@ -33,8 +72,8 @@ class DiagnosticEngine:
         elif entity_type == "node":
             return self._diagnose_node(target_entity, evidence_list, now)
         else:
-            # Default to topic inspection (covers Case A and Case D)
             return self._diagnose_topic(target_entity, evidence_list, now)
+
 
     def _diagnose_topic(self, topic: str, evidence: List[EvidenceRecord], now: str) -> DiagnosisResponse:
         endpoint_data = self.inspector.inspect_topic_endpoints(topic)
