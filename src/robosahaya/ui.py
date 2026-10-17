@@ -116,7 +116,8 @@ class RoboSahayaApp:
 def create_ui() -> gr.Blocks:
     app_instance = RoboSahayaApp()
 
-    with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"), title="RoboSahaya — ROS 2 Voice Debugging Copilot") as demo:
+    with gr.Blocks(title="RoboSahaya — ROS 2 Voice Debugging Copilot") as demo:
+
         gr.Markdown(
             """
             # 🤖 RoboSahaya — Voice-First ROS 2 Debugging Copilot

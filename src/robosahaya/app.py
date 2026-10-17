@@ -24,7 +24,8 @@ def main():
     print("=" * 65)
 
     demo = create_ui()
-    demo.queue().launch(server_name=args.host, server_port=args.port, share=args.share)
+    demo.launch(server_name=args.host, server_port=args.port, share=args.share)
+
 
 if __name__ == "__main__":
     main()
