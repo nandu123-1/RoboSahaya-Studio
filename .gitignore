@@ -9,3 +9,6 @@ recordings/
 dist/
 build/
 *.egg-info/
+models/
+*.safetensors
+

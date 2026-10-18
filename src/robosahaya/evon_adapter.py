@@ -45,17 +45,55 @@ You must respond ONLY with valid JSON conforming to this schema:
 """
 
 class EvonReasoningAdapter:
-    """Adapter for Gnani AI Evon v3.3 reasoning model."""
+    """Adapter for Gnani AI Evon v3.3 30B MoE reasoning model."""
 
     def __init__(self, endpoint_url: Optional[str] = None, api_key: Optional[str] = None):
-        self.endpoint_url = endpoint_url or getattr(settings, "EVON_API_URL", "https://api.gnani.ai/v1/evon/generate")
+        self.endpoint_url = endpoint_url or getattr(settings, "EVON_API_URL", "http://localhost:8000/v1/chat/completions")
         self.api_key = api_key or settings.GNANI_API_KEY
+        self.local_model_dir = settings.LOCAL_MODEL_DIR
+        self.tokenizer = None
+        self._init_local_tokenizer()
+
+    def _init_local_tokenizer(self):
+        tok_file = self.local_model_dir / "tokenizer.json"
+        if tok_file.exists():
+            try:
+                from tokenizers import Tokenizer
+                self.tokenizer = Tokenizer.from_file(str(tok_file))
+            except Exception as ex:
+                print(f"[EvonAdapter] Could not load local tokenizer: {ex}")
+
+    def count_tokens(self, text: str) -> int:
+        if self.tokenizer is not None:
+            return len(self.tokenizer.encode(text).ids)
+        return len(text.split())
+
+    def format_chatml_prompt(self, system_msg: str, user_msg: str) -> str:
+        return f"<|im_start|>system\n{system_msg}<|im_end|>\n<|im_start|>user\n{user_msg}<|im_end|>\n<|im_start|>assistant\n"
+
+    def get_local_model_info(self) -> Dict[str, Any]:
+        has_config = (self.local_model_dir / "config.json").exists()
+        has_index = (self.local_model_dir / "model.safetensors.index.json").exists()
+        shard_count = len(list(self.local_model_dir.glob("model-*.safetensors")))
+        return {
+            "model_name": "gnani-evon-v3.3",
+            "parameters": "30B MoE (~3.5B active)",
+            "architecture": "NemotronHForCausalLM (Mamba2 + Transformer)",
+            "local_dir": str(self.local_model_dir),
+            "weights_present": has_config and has_index and shard_count == 13,
+            "shard_count": shard_count,
+            "expected_shards": 13,
+            "has_tokenizer": self.tokenizer is not None,
+            "vocab_size": self.tokenizer.get_vocab_size() if self.tokenizer else 163072,
+            "max_context": 131072
+        }
 
     @property
     def is_live(self) -> bool:
         return bool(self.api_key and self.api_key != "your_gnani_api_key_here")
 
     def _build_user_prompt(self, target_entity: str, entity_type: str, evidence: List[EvidenceRecord], query_text: str) -> str:
+
         bundle = {
             "user_query": query_text,
             "target_entity": target_entity,

@@ -18,5 +18,8 @@ class Settings:
     # Paths
     PROJECT_ROOT: Path = ROOT_DIR
     FIXTURES_DIR: Path = ROOT_DIR / "tests" / "fixtures" / "snapshots"
+    LOCAL_MODEL_DIR: Path = Path(os.getenv("LOCAL_MODEL_DIR", str(ROOT_DIR / "models")))
+    EVON_API_URL: str = os.getenv("EVON_API_URL", "http://localhost:8000/v1/chat/completions").strip()
 
 settings = Settings()
+

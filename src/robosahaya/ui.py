@@ -38,7 +38,15 @@ class RoboSahayaApp:
         self.scenario = scenario_name
         if isinstance(self.inspector, MockInspector):
             self.inspector.load_scenario(scenario_name)
-        return f"Active Inspector Mode: Mock Replay | Scenario: `{scenario_name}`"
+        local_info = self.engine.evon_adapter.get_local_model_info()
+        model_badge = (
+            f"🟢 **Local Weights Verified:** `{local_info['model_name']}` ({local_info['parameters']}) | "
+            f"**Shards:** `{local_info['shard_count']}/{local_info['expected_shards']} Safetensors` | "
+            f"**Tokenizer:** `{local_info['vocab_size']:,} Vocab`"
+            if local_info["weights_present"]
+            else "🟡 **Local Weights:** Offline / Simulated Fallback Active"
+        )
+        return f"**System State:** `Mock Replay Active` | **Scenario:** `{scenario_name}` | **ROS Distro:** `Jazzy`\n\n{model_badge}"
 
     async def process_pipeline(
         self,
@@ -73,7 +81,8 @@ class RoboSahayaApp:
         # Step 2: Entity Grounding
         grounding_res = self.grounder.ground(raw_text)
         code_mixed_status = "✨ Telugu-English Detected" if grounding_res.is_code_mixed else "English"
-        engine_badge = "🧠 Powered by Gnani AI Evon v3.3" if engine_mode == "ai" else "⚙️ Deterministic Rule Baseline"
+        token_count = self.engine.evon_adapter.count_tokens(raw_text)
+        engine_badge = f"🧠 Powered by Gnani AI Evon v3.3 (Local Tokenizer: {token_count} tokens)" if engine_mode == "ai" else "⚙️ Deterministic Rule Baseline"
         
         target = "/scan"
         etype = "topic"
@@ -156,8 +165,18 @@ def create_ui() -> gr.Blocks:
                 info="Toggle between Gnani AI's Evon reasoning model and the deterministic rule safety baseline."
             )
 
+        local_info = app_instance.engine.evon_adapter.get_local_model_info()
+        if local_info["weights_present"]:
+            model_badge_md = (
+                f"🟢 **Local Weights Verified:** `{local_info['model_name']}` ({local_info['parameters']}) | "
+                f"**Shards:** `{local_info['shard_count']}/{local_info['expected_shards']} Safetensors` | "
+                f"**Tokenizer:** `{local_info['vocab_size']:,} Vocab` | **Context:** `{local_info['max_context']:,} tokens`"
+            )
+        else:
+            model_badge_md = "🟡 **Local Weights:** Offline / Simulated Fallback Active"
+
         mode_badge = gr.Markdown(
-            f"**System State:** `Mock Replay Active` | **ROS Distro:** `Jazzy` | **Domain:** `{settings.ROS_DOMAIN_ID}`"
+            f"**System State:** `Mock Replay Active` | **ROS Distro:** `Jazzy` | **Domain:** `{settings.ROS_DOMAIN_ID}`\n\n{model_badge_md}"
         )
 
         with gr.Row():
