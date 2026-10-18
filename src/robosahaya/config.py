@@ -8,9 +8,9 @@ load_dotenv(ROOT_DIR / ".env")
 
 class Settings:
     GNANI_API_KEY: str = os.getenv("GNANI_API_KEY", "").strip()
-    GNANI_BASE_URL: str = os.getenv("GNANI_BASE_URL", "https://api.gnani.ai/v1").strip().rstrip("/")
+    GNANI_BASE_URL: str = os.getenv("GNANI_BASE_URL", "https://api.vachana.ai").strip().rstrip("/")
     ROS_DOMAIN_ID: int = int(os.getenv("ROS_DOMAIN_ID", "0"))
-    ROBOSAHAYA_MODE: str = os.getenv("ROBOSAHAYA_MODE", "mock").strip().lower()
+    ROBOSAHAYA_MODE: str = os.getenv("ROBOSAHAYA_MODE", "live").strip().lower()
     ROBOSAHAYA_MOCK_SCENARIO: str = os.getenv("ROBOSAHAYA_MOCK_SCENARIO", "qos_reliability_mismatch").strip()
     HOST: str = os.getenv("HOST", "127.0.0.1").strip()
     PORT: int = int(os.getenv("PORT", "7860"))

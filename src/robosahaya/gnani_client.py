@@ -11,71 +11,86 @@ class GnaniClient:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.api_key and self.api_key != "your_gnani_api_key_here")
+        return bool(self.api_key and len(self.api_key) > 10 and self.api_key != "your_gnani_api_key_here")
 
     async def transcribe_audio(self, audio_bytes: bytes, lang: str = "en-IN") -> str:
         """
-        Transcribe audio using Gnani Prisma STT.
-        Normalizes to 16kHz mono WAV. If API key is not configured, returns mock transcript.
+        Transcribe audio using Gnani Prisma STT (v3 on Vachana platform).
         """
         if not self.is_configured:
-            # Fallback mock for offline demonstration / testing
-            return "slash can data ravatledu kani robot tirugutondi"
+            return ""
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}"
+            "X-API-Key-ID": self.api_key
         }
         files = {
-            "file": ("audio.wav", audio_bytes, "audio/wav")
+            "audio_file": ("audio.wav", audio_bytes, "audio/wav")
         }
         data = {
-            "language": lang,
-            "encoding": "LINEAR16",
-            "sample_rate": 16000
+            "language_code": lang,
+            "preferred_language": lang,
+            "format": "transcribe"
         }
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             try:
                 resp = await client.post(
-                    f"{self.base_url}/stt/transcribe",
+                    f"{self.base_url}/stt/v3",
                     headers=headers,
                     files=files,
                     data=data
                 )
                 resp.raise_for_status()
                 json_res = resp.json()
-                return json_res.get("transcript", "")
+                transcript = json_res.get("transcript") or json_res.get("output", {}).get("literal", "")
+                return transcript.strip()
             except Exception as ex:
+                print(f"[Gnani Prisma STT Error] {ex}")
                 raise RuntimeError(f"Gnani Prisma STT failed: {str(ex)}") from ex
 
-    async def synthesize_speech(self, text: str, voice: str = "tejas") -> Optional[bytes]:
+    async def synthesize_speech(self, text: str, voice: str = "Kaveri", lang: str = "en-IN") -> Optional[bytes]:
         """
-        Synthesize text into speech using Gnani Timbre TTS.
-        Returns audio bytes or None on failure/unconfigured.
+        Synthesize text into speech using Gnani Timbre TTS (v2.5 on Vachana platform).
+        Returns raw WAV audio bytes or None on failure.
         """
         if not self.is_configured:
             return None
 
+        # Clean text of markdown characters for natural speech synthesis
+        clean_text = text.replace("`", "").replace("*", "").replace("#", "").replace("|", "")
+        # Limit length to avoid exceeding TTS buffer
+        clean_text = clean_text[:400].strip()
+        if not clean_text:
+            return None
+
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "X-API-Key-ID": self.api_key,
             "Content-Type": "application/json"
         }
         payload = {
-            "text": text,
+            "text": clean_text,
             "voice": voice,
-            "format": "wav",
-            "rate": 1.0
+            "model": "timbre-v2.5",
+            "language": lang,
+            "speed": 1,
+            "audio_config": {
+                "encoding": "linear_pcm",
+                "container": "wav",
+                "num_channels": 1,
+                "sample_rate": 24000,
+                "sample_width": 2
+            }
         }
 
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             try:
                 resp = await client.post(
-                    f"{self.base_url}/tts/synthesize",
+                    f"{self.base_url}/api/v1/tts/inference",
                     headers=headers,
                     json=payload
                 )
                 resp.raise_for_status()
                 return resp.content
-            except Exception:
-                # Timbre TTS is non-blocking and fails gracefully to written terminal card
+            except Exception as ex:
+                print(f"[Gnani Timbre TTS Error] {ex}")
                 return None

@@ -65,14 +65,53 @@ class DiagnosticEngine:
         now: str
     ) -> DiagnosisResponse:
         # Route according to entity type or intent
-        if intent == "sim_time_check" or target_entity == "use_sim_time":
+        if target_entity in ["ros2_system", "", "system"] or entity_type == "system":
+            return self._diagnose_system_status(evidence_list, now)
+        elif intent == "sim_time_check" or target_entity == "use_sim_time":
             return self._diagnose_sim_time(evidence_list, now)
         elif entity_type == "frame" or intent == "tf_check":
-            return self._diagnose_tf(target_entity, evidence_list, now)
-        elif entity_type == "node":
-            return self._diagnose_node(target_entity, evidence_list, now)
+            return self._diagnose_tf(target_entity or "camera_link", evidence_list, now)
+        elif entity_type == "node" or intent in ["node_inspection", "node_crash_check"]:
+            return self._diagnose_node(target_entity or "/robot_state_publisher", evidence_list, now)
+        elif intent == "motion_control_check":
+            return self._diagnose_topic(target_entity if target_entity.startswith("/") else "/cmd_vel", evidence_list, now)
         else:
-            return self._diagnose_topic(target_entity, evidence_list, now)
+            return self._diagnose_topic(target_entity or "/scan", evidence_list, now)
+
+    def _diagnose_system_status(self, evidence: List[EvidenceRecord], now: str) -> DiagnosisResponse:
+        graph = self.inspector.inspect_graph()
+        evidence.append(EvidenceRecord(
+            evidence_id="E1",
+            source=EvidenceSource.GRAPH_TOPIC,
+            observed_at=now,
+            target="ros2_system",
+            result={"node_count": len(graph.nodes), "topic_count": len(graph.topics), "clock_active": graph.clock_active},
+            status=EvidenceStatus.SUCCESS,
+            limitations="Graph snapshot reflects discovery within the active ROS domain."
+        ))
+
+        return DiagnosisResponse(
+            case_id="system_status_ok",
+            issue_summary=f"ROS 2 System Status: {len(graph.nodes)} node(s) and {len(graph.topics)} topic(s) active",
+            plain_language_analogy="Like an automated inspection scan verifying connected sensors and network buses.",
+            observations=["E1"],
+            hypotheses=[
+                Hypothesis(
+                    label=f"Active graph contains {len(graph.nodes)} nodes and {len(graph.topics)} topics",
+                    evidence_ids=["E1"],
+                    confidence=ConfidenceLabel.HIGH,
+                    caveat="Check specific topics or nodes for detailed throughput and QoS inspection."
+                )
+            ],
+            confidence_label=ConfidenceLabel.HIGH,
+            voice_script=f"RoboSahaya inspected the ROS 2 graph. Found {len(graph.nodes)} nodes and {len(graph.topics)} topics active.",
+            terminal_card=[
+                CommandCatalogue.get_command("list_nodes"),
+                CommandCatalogue.get_command("list_topics")
+            ],
+            next_question="Which specific topic or node would you like to inspect?",
+            limitations=[]
+        )
 
 
     def _diagnose_topic(self, topic: str, evidence: List[EvidenceRecord], now: str) -> DiagnosisResponse:

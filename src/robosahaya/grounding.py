@@ -103,9 +103,22 @@ class EntityGrounder:
         is_code_mixed = self.detect_code_mixed(transcript)
         detected: List[GroundedEntity] = []
 
-        # 1. Check known phonetic variations
+        # 1. Dynamic regex scan for explicit ROS 2 topics/paths (e.g. /camera/image_raw, /cmd_vel)
+        slash_matches = re.findall(r'(/[\w-]+(?:/[\w-]+)*)', transcript)
+        for s in slash_matches:
+            # Normalize trailing punctuation
+            canonical = s.rstrip(".,?!:;")
+            if canonical and not any(d.canonical_name == canonical for d in detected):
+                detected.append(GroundedEntity(
+                    raw_token=s,
+                    canonical_name=canonical,
+                    entity_type="topic",
+                    confidence=1.0
+                ))
+
+        # 2. Check known phonetic variations
         for phonetic, (canonical, etype) in PHONETIC_ACOUSTIC_MAP.items():
-            if phonetic in lower:
+            if phonetic in lower and not any(d.canonical_name == canonical for d in detected):
                 detected.append(GroundedEntity(
                     raw_token=phonetic,
                     canonical_name=canonical,
@@ -113,7 +126,7 @@ class EntityGrounder:
                     confidence=0.95
                 ))
 
-        # 2. Check exact known topics/nodes/frames mentioned in transcript
+        # 3. Check exact known topics/nodes/frames mentioned in transcript
         for topic in self.known_topics:
             if topic.lower() in lower and not any(d.canonical_name == topic for d in detected):
                 detected.append(GroundedEntity(
@@ -141,7 +154,18 @@ class EntityGrounder:
                     confidence=0.98
                 ))
 
-        # 3. Fuzzy match remaining tokens if no high-confidence match
+        # 4. Regex scan for coordinate frames ending in _link or _frame
+        frame_matches = re.findall(r'\b([\w]+_(?:link|frame|footprint|optical))\b', lower)
+        for f in frame_matches:
+            if not any(d.canonical_name == f for d in detected):
+                detected.append(GroundedEntity(
+                    raw_token=f,
+                    canonical_name=f,
+                    entity_type="frame",
+                    confidence=0.95
+                ))
+
+        # 5. Fuzzy match remaining tokens if no high-confidence match
         if not detected:
             all_known = (
                 [(t, "topic") for t in self.known_topics] +
@@ -150,7 +174,7 @@ class EntityGrounder:
             )
             names_only = [item[0] for item in all_known]
             match = process.extractOne(lower, names_only, scorer=fuzz.partial_ratio)
-            if match and match[1] >= 65:
+            if match and match[1] >= 75:
                 matched_name = match[0]
                 matched_type = next(t for n, t in all_known if n == matched_name)
                 conf = round(match[1] / 100.0, 2)
@@ -166,16 +190,30 @@ class EntityGrounder:
         # Select primary target
         primary = max(detected, key=lambda x: x.confidence) if detected else None
 
-        # Infer intent
+        # Infer intent comprehensively
         intent = "general_debug"
-        if "sim" in lower or "clock" in lower or "time mismatch" in lower:
+        if any(k in lower for k in ["sim time", "clock", "simulation", "gazebo", "time mismatch", "use_sim_time"]):
             intent = "sim_time_check"
-        elif "qos" in lower or "compatible" in lower or "reliability" in lower:
+        elif any(k in lower for k in ["qos", "compatible", "reliability", "best effort", "best_effort", "transient_local", "durability"]):
             intent = "qos_check"
-        elif "tf" in lower or "frame" in lower or "transform" in lower:
+        elif any(k in lower for k in ["tf", "transform", "coordinate frame", "quaternion", "tree", "joint", "urdf"]):
             intent = "tf_check"
+        elif any(k in lower for k in ["crash", "exit code", "killed", "died", "segmentation", "core dump"]):
+            intent = "node_crash_check"
+        elif any(k in lower for k in ["lifecycle", "unconfigured", "inactive", "activate"]):
+            intent = "lifecycle_check"
+        elif any(k in lower for k in ["hz", "rate", "frequency", "fps", "lag", "latency"]):
+            intent = "rate_check"
+        elif any(k in lower for k in ["cmd_vel", "velocity", "move", "moving", "speed", "motor", "tirugutondi", "kadalatledu"]):
+            intent = "motion_control_check"
+        elif any(k in lower for k in ["nav2", "navigation", "costmap", "path", "planner"]):
+            intent = "navigation_check"
         elif primary and primary.entity_type == "topic":
             intent = "topic_inspection"
+        elif primary and primary.entity_type == "node":
+            intent = "node_inspection"
+        elif primary and primary.entity_type == "frame":
+            intent = "tf_check"
 
         return GroundingResult(
             original_text=transcript,

@@ -167,33 +167,38 @@ class EvonReasoningAdapter:
         """
         evidence_ids = [e.evidence_id for e in evidence]
         
-        # Check QoS in evidence
-        for e in evidence:
-            if "publisher_reliability" in e.result:
-                pub_rel = e.result["publisher_reliability"]
-                sub_rel = e.result["subscriber_reliability"]
-                return DiagnosisResponse(
-                    case_id="case_d_qos_reliability_mismatch",
-                    issue_summary=f"Evon AI detected middleware packet rejection on '{target_entity}' ({pub_rel} vs {sub_rel})",
-                    plain_language_analogy="Evon Analogy: Like a courier delivering packages via standard surface mail when the recipient signed up exclusively for insured air delivery—the guard at the gate refuses to accept it.",
-                    observations=evidence_ids,
-                    hypotheses=[
-                        Hypothesis(
-                            label=f"DDS transport layer silently drops samples because subscriber demands {sub_rel} delivery from a {pub_rel} sensor driver",
-                            evidence_ids=[e.evidence_id],
-                            confidence=ConfidenceLabel.HIGH,
-                            caveat="The hardware publisher is transmitting valid data, but the ROS 2 executor discards it at the callback queue."
-                        )
-                    ],
-                    confidence_label=ConfidenceLabel.HIGH,
-                    voice_script=f"Evon detected a QoS reliability mismatch on {target_entity}. Update your subscriber profile to best effort to restore sensor processing.",
-                    terminal_card=[
-                        CommandCatalogue.get_command("topic_info", topic=target_entity),
-                        CommandCatalogue.get_command("topic_hz", topic=target_entity)
-                    ],
-                    next_question="Would you like to inspect the launch file QoS parameters?",
-                    limitations=["Middleware policy incompatibility cannot be bypassed without updating node parameters."]
-                )
+        q_lower = user_query.lower()
+
+        # Check QoS in evidence or query
+        if any("publisher_reliability" in e.result for e in evidence) or any(k in q_lower for k in ["qos", "reliability", "best effort", "best_effort"]):
+            pub_rel = "BEST_EFFORT"
+            sub_rel = "RELIABLE"
+            for e in evidence:
+                if "publisher_reliability" in e.result:
+                    pub_rel = e.result["publisher_reliability"]
+                    sub_rel = e.result["subscriber_reliability"]
+            return DiagnosisResponse(
+                case_id="case_d_qos_reliability_mismatch",
+                issue_summary=f"Evon AI detected middleware packet rejection on '{target_entity}' ({pub_rel} vs {sub_rel})",
+                plain_language_analogy="Evon Analogy: Like a courier delivering packages via standard surface mail when the recipient signed up exclusively for insured air delivery—the guard at the gate refuses to accept it.",
+                observations=evidence_ids,
+                hypotheses=[
+                    Hypothesis(
+                        label=f"DDS transport layer silently drops samples because subscriber demands {sub_rel} delivery from a {pub_rel} sensor driver",
+                        evidence_ids=evidence_ids,
+                        confidence=ConfidenceLabel.HIGH,
+                        caveat="The hardware publisher is transmitting valid data, but the ROS 2 executor discards it at the callback queue."
+                    )
+                ],
+                confidence_label=ConfidenceLabel.HIGH,
+                voice_script=f"Evon detected a QoS reliability mismatch on {target_entity}. Update your subscriber profile to best effort to restore sensor processing.",
+                terminal_card=[
+                    CommandCatalogue.get_command("topic_info", topic=target_entity if target_entity.startswith("/") else "/scan"),
+                    CommandCatalogue.get_command("topic_hz", topic=target_entity if target_entity.startswith("/") else "/scan")
+                ],
+                next_question="Would you like to inspect the launch file QoS parameters?",
+                limitations=["Middleware policy incompatibility cannot be bypassed without updating node parameters."]
+            )
 
         # Check missing publishers
         for e in evidence:
@@ -221,56 +226,158 @@ class EvonReasoningAdapter:
                     limitations=["Driver process crashes cannot be verified without reading stdout/stderr logs."]
                 )
 
-        # Check TF failure
+        # Check topic absence in evidence
         for e in evidence:
-            if "available" in e.result and not e.result["available"]:
+            if e.result.get("exists_in_graph") is False:
                 return DiagnosisResponse(
-                    case_id="case_c_tf_transform_failure",
-                    issue_summary=f"Evon AI detected a kinematic transform discontinuity reaching '{target_entity}'",
-                    plain_language_analogy="Evon Analogy: Like an anatomical chart where a muscle connects the wrist to a finger that isn't attached to the hand.",
+                    case_id="case_a_topic_absent",
+                    issue_summary=f"Evon AI detected that topic '{target_entity}' is not registered in the active ROS 2 graph",
+                    plain_language_analogy=f"Evon Analogy: Like tuning a radio into a channel for '{target_entity}' where no broadcaster has ever set up a transmitter.",
                     observations=evidence_ids,
                     hypotheses=[
                         Hypothesis(
-                            label=f"Transform frame '{target_entity}' has no parent link in the TF broadcast tree",
+                            label=f"Expected publisher or driver node for '{target_entity}' was never launched or crashed on startup",
                             evidence_ids=[e.evidence_id],
                             confidence=ConfidenceLabel.HIGH,
-                            caveat="Verify that your URDF xacro includes a fixed joint connecting base_link to this sensor."
+                            caveat="Check whether the driver node is publishing under a remapped namespace or different ROS_DOMAIN_ID."
                         )
                     ],
                     confidence_label=ConfidenceLabel.HIGH,
-                    voice_script=f"Evon found a disconnected coordinate frame for {target_entity}. Let's generate a TF tree diagram to find the missing joint.",
+                    voice_script=f"Evon found that topic {target_entity} does not exist in the active ROS 2 graph. Check if your driver node is launched.",
                     terminal_card=[
-                        CommandCatalogue.get_command("tf_view_frames"),
+                        CommandCatalogue.get_command("list_topics"),
                         CommandCatalogue.get_command("list_nodes")
                     ],
-                    next_question="Is robot_state_publisher publishing the robot_description topic?",
-                    limitations=["TF tree view requires generating a PDF diagram."]
+                    next_question=f"Which launch file starts the node responsible for {target_entity}?",
+                    limitations=["Topic discovery requires active DDS multicast discovery within the current domain."]
                 )
 
-        # Check simulation time mismatch in evidence
+        # Check missing nodes in evidence
         for e in evidence:
-            if e.target.endswith("/use_sim_time") and e.result.get("value") is False:
+            if e.result.get("is_running") is False:
                 return DiagnosisResponse(
-                    case_id="case_e_sim_time_divergence",
-                    issue_summary=f"Evon AI identified temporal desynchronization on {e.target}",
-                    plain_language_analogy="Evon Analogy: Like one runner listening to an umpire's whistle while another watches a wall clock in a different time zone.",
+                    case_id="case_b_missing_node",
+                    issue_summary=f"Evon AI identified that node '{target_entity}' is not running in the current ROS 2 domain",
+                    plain_language_analogy="Evon Analogy: Like arriving at an office and finding an assigned specialist's desk completely unoccupied.",
                     observations=evidence_ids,
                     hypotheses=[
                         Hypothesis(
-                            label=f"Node {e.target.split('/')[0]} has use_sim_time=false while simulation clock is active",
+                            label=f"Node '{target_entity}' crashed during initialization or was never launched",
                             evidence_ids=[e.evidence_id],
                             confidence=ConfidenceLabel.HIGH,
-                            caveat="Nodes in simulation must be synchronized to /clock."
+                            caveat="Inspect terminal launch logs for segmentation fault, missing shared library, or parameter error."
                         )
                     ],
                     confidence_label=ConfidenceLabel.HIGH,
-                    voice_script="Evon detected that simulation time is not synchronized across all active nodes.",
+                    voice_script=f"Evon confirmed node {target_entity} is not active in the ROS graph. Check your launch logs for startup errors.",
                     terminal_card=[
                         CommandCatalogue.get_command("list_nodes")
                     ],
-                    next_question="Do all nodes have use_sim_time:=true in their launch configuration?",
-                    limitations=[]
+                    next_question=f"What command did you use to start {target_entity}?",
+                    limitations=["Process crashes cannot be confirmed without reading process stdout/stderr."]
                 )
+
+        # Check TF failure in evidence or query
+        if any("available" in e.result and not e.result["available"] for e in evidence) or entity_type == "frame" or any(k in q_lower for k in ["tf", "transform", "coordinate frame", "camera_link"]):
+            target_frame = target_entity if entity_type == "frame" or not target_entity.startswith("/") else "camera_link"
+            return DiagnosisResponse(
+                case_id="case_c_tf_transform_failure",
+                issue_summary=f"Evon AI detected a kinematic transform discontinuity reaching '{target_frame}'",
+                plain_language_analogy="Evon Analogy: Like an anatomical chart where a muscle connects the wrist to a finger that isn't attached to the hand.",
+                observations=evidence_ids,
+                hypotheses=[
+                    Hypothesis(
+                        label=f"Transform frame '{target_frame}' has no parent link in the TF broadcast tree",
+                        evidence_ids=evidence_ids,
+                        confidence=ConfidenceLabel.HIGH,
+                        caveat="Verify that your URDF xacro includes a fixed joint connecting base_link to this sensor."
+                    )
+                ],
+                confidence_label=ConfidenceLabel.HIGH,
+                voice_script=f"Evon found a disconnected coordinate frame for {target_frame}. Let's generate a TF tree diagram to find the missing joint.",
+                terminal_card=[
+                    CommandCatalogue.get_command("tf_view_frames"),
+                    CommandCatalogue.get_command("list_nodes")
+                ],
+                next_question="Is robot_state_publisher publishing the robot_description topic?",
+                limitations=["TF tree view requires generating a PDF diagram."]
+            )
+
+        # Check simulation time mismatch in evidence or query
+        if any(e.target.endswith("/use_sim_time") and e.result.get("value") is False for e in evidence) or any(k in q_lower for k in ["sim time", "clock", "simulation time", "use_sim_time"]):
+            culprit = target_entity if target_entity and not target_entity.startswith("/") else "controller"
+            return DiagnosisResponse(
+                case_id="case_e_sim_time_divergence",
+                issue_summary=f"Evon AI identified temporal desynchronization on {culprit}",
+                plain_language_analogy="Evon Analogy: Like one runner listening to an umpire's whistle while another watches a wall clock in a different time zone.",
+                observations=evidence_ids,
+                hypotheses=[
+                    Hypothesis(
+                        label=f"Node {culprit} has use_sim_time=false while simulation clock is active",
+                        evidence_ids=evidence_ids,
+                        confidence=ConfidenceLabel.HIGH,
+                        caveat="Nodes in simulation must be synchronized to /clock."
+                    )
+                ],
+                confidence_label=ConfidenceLabel.HIGH,
+                voice_script="Evon detected that simulation time is not synchronized across all active nodes.",
+                terminal_card=[
+                    CommandCatalogue.get_command("list_nodes")
+                ],
+                next_question="Do all nodes have use_sim_time:=true in their launch configuration?",
+                limitations=[]
+            )
+
+        # Check motion control / velocity commands in query or entity
+        q_lower = user_query.lower()
+        if "cmd_vel" in target_entity or any(k in q_lower for k in ["cmd_vel", "velocity", "move", "tirugutondi", "kadalatledu", "wheel"]):
+            return DiagnosisResponse(
+                case_id="motion_control_issue",
+                issue_summary=f"Evon AI analyzed motion control and velocity command delivery for '{target_entity}'",
+                plain_language_analogy="Evon Analogy: Like stepping on an accelerator pedal while the transmission clutch is disengaged—the driver signals forward motion, but rotational torque is not transferred to the wheels.",
+                observations=evidence_ids,
+                hypotheses=[
+                    Hypothesis(
+                        label="Velocity command stream is not received by the base motor controller or is inhibited by an emergency stop / safety watchdog",
+                        evidence_ids=evidence_ids,
+                        confidence=ConfidenceLabel.HIGH,
+                        caveat="Check if twist_mux priority rules or zero-velocity timeout (>200ms) stopped the robot."
+                    )
+                ],
+                confidence_label=ConfidenceLabel.HIGH,
+                voice_script=f"Evon analyzed velocity control for {target_entity}. Verify that your base controller is subscribed and motor drivers are receiving commands.",
+                terminal_card=[
+                    CommandCatalogue.get_command("topic_info", topic=target_entity if target_entity.startswith("/") else "/cmd_vel"),
+                    CommandCatalogue.get_command("topic_hz", topic=target_entity if target_entity.startswith("/") else "/cmd_vel")
+                ],
+                next_question="Is teleop_twist_keyboard or your navigation stack actively sending velocity commands?",
+                limitations=[]
+            )
+
+        # General system query or empty target
+        if target_entity in ["ros2_system", "", "system"]:
+            return DiagnosisResponse(
+                case_id="system_status_inquiry",
+                issue_summary="Evon AI analyzed active ROS 2 graph state across running nodes and topics",
+                plain_language_analogy="Evon Analogy: Like a diagnostic dashboard scanning all network circuits to detect unplugged components.",
+                observations=evidence_ids,
+                hypotheses=[
+                    Hypothesis(
+                        label="General system check performed across all active nodes and topics",
+                        evidence_ids=evidence_ids,
+                        confidence=ConfidenceLabel.HIGH,
+                        caveat="Specific subsystem diagnosis requires naming a topic, node, or transform frame."
+                    )
+                ],
+                confidence_label=ConfidenceLabel.HIGH,
+                voice_script="Evon inspected your active ROS 2 graph. Use the commands below to view all running nodes and topics.",
+                terminal_card=[
+                    CommandCatalogue.get_command("list_nodes"),
+                    CommandCatalogue.get_command("list_topics")
+                ],
+                next_question="Which specific topic or node would you like to inspect in detail?",
+                limitations=[]
+            )
 
         # Default healthy / nominal state
         return DiagnosisResponse(
