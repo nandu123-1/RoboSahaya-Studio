@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -297,7 +298,12 @@ class MujocoAdapter(SimulatorAdapter):
         """Launch the official MuJoCo interactive viewer."""
         env = os.environ.copy()
         if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
-            return {"success": False, "error": "No graphical DISPLAY or WAYLAND_DISPLAY detected."}
+            if os.path.exists("/tmp/.X11-unix/X1"):
+                env["DISPLAY"] = ":1"
+            elif os.path.exists("/tmp/.X11-unix/X0"):
+                env["DISPLAY"] = ":0"
+            else:
+                return {"success": False, "error": "No graphical DISPLAY or WAYLAND_DISPLAY detected."}
 
         if isinstance(context, (str, Path)):
             model_path = Path(context)
@@ -317,13 +323,21 @@ class MujocoAdapter(SimulatorAdapter):
 
         try:
             proc = subprocess.Popen(
-                ["python3", "-m", "mujoco.viewer", f"--mjcf={str(view_target)}"],
+                [sys.executable, "-m", "mujoco.viewer", f"--mjcf={str(view_target)}"],
                 env=env,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            import time
+            time.sleep(0.4)
+            ret = proc.poll()
+            if ret is not None:
+                _, err = proc.communicate()
+                err_msg = err.decode().strip() or f"Viewer process exited immediately with returncode {ret}"
+                return {"success": False, "error": err_msg}
+
             self._active_processes[task_id] = proc
             return {"success": True, "pid": proc.pid, "target": str(view_target)}
         except Exception as exc:

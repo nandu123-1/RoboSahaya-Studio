@@ -628,8 +628,13 @@ class TaskOrchestrator:
         )
 
         gui_info = {}
-        if not headless and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        if not headless:
+            emit(TaskStage.LAUNCHING, "Launching interactive MuJoCo 3D viewer on desktop...", speak=True, tool="launch_mujoco_viewer")
             gui_info = adapter.launch_gui({"model_path": str(model_path), "task_id": task_id})
+            if gui_info.get("success"):
+                emit(TaskStage.LAUNCHING, f"MuJoCo 3D viewer opened (PID: {gui_info.get('pid')}). Check your desktop for the 3D window.", severity="info")
+            else:
+                emit(TaskStage.LAUNCHING, f"MuJoCo 3D viewer launch notice: {gui_info.get('error')}", severity="warning")
 
         emit(TaskStage.COMPLETED, f"{target_model.display_name} simulation verification completed successfully. Robot is simulation-ready.", severity="success", speak=True)
         return {

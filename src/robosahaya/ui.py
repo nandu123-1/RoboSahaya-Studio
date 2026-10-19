@@ -432,7 +432,7 @@ def create_ui() -> gr.Blocks:
                     cancel_btn = gr.Button("⏹️ Cancel Pipeline", variant="stop", scale=1)
                     open_gui_btn = gr.Button("🖥️ Open Simulator GUI", variant="secondary", scale=1)
 
-                gui_status_md = gr.Markdown("*Gazebo 3D simulation window will open automatically when pipeline launches with GUI enabled.*")
+                gui_status_md = gr.Markdown("*3D simulation window (Gazebo or MuJoCo) will open automatically when pipeline launches with GUI enabled.*")
 
                 voice_player = gr.Audio(
                     label="🗣️ Studio Voice Telemetry (Gnani Timbre TTS — Kaveri Voice)",
@@ -793,7 +793,7 @@ def create_ui() -> gr.Blocks:
 
                 def on_open_gui(state):
                     plan = (state or {}).get("plan")
-                    if plan and getattr(plan, "simulator_adapter", None) == "mujoco":
+                    if plan and (getattr(plan, "simulator_adapter", None) == "mujoco" or getattr(plan, "robot_template", "") == "rsk"):
                         import os
                         from .simulators.registry import get_simulator_registry
                         from .robot_registry import get_robot_registry
@@ -803,15 +803,32 @@ def create_ui() -> gr.Blocks:
                         r_model = robot_reg.get(plan.robot_template)
                         entrypoint = r_model.description.entrypoint if r_model and r_model.description else None
                         if not entrypoint or not os.path.exists(entrypoint):
+                            # Check verified cache directory
+                            v_dir = app.orchestrator.robot_catalog.model_cache.get_version_dir(plan.robot_template)
+                            if (v_dir / "model" / "scene.xml").exists():
+                                entrypoint = str(v_dir / "model" / "scene.xml")
+                            elif (v_dir / "scene.xml").exists():
+                                entrypoint = str(v_dir / "scene.xml")
+                            elif (v_dir / "model" / "robot_soccer_kit.xml").exists():
+                                entrypoint = str(v_dir / "model" / "robot_soccer_kit.xml")
+                            else:
+                                xmls = list(v_dir.glob("**/*.xml"))
+                                if xmls:
+                                    entrypoint = str(xmls[0])
+                        if not entrypoint or not os.path.exists(entrypoint):
                             from .model_discovery import ModelDiscovery
                             discovery = ModelDiscovery()
                             pkg = discovery.discover_local_packages().get(plan.robot_template)
                             if pkg and pkg.entrypoint and os.path.exists(pkg.entrypoint):
                                 entrypoint = pkg.entrypoint
+                        if not entrypoint or not os.path.exists(entrypoint):
+                            menagerie_dir = Path.home() / ".cache" / "robot_descriptions" / "mujoco_menagerie" / "robot_soccer_kit"
+                            if (menagerie_dir / "scene.xml").exists():
+                                entrypoint = str(menagerie_dir / "scene.xml")
                         if entrypoint and os.path.exists(entrypoint):
                             res = mujoco_adapter.launch_gui(entrypoint)
                             if res.get("success"):
-                                return f"🟢 **MuJoCo GUI Opened**: Viewer launched for `{os.path.basename(entrypoint)}`. Check your desktop for the MuJoCo simulation window."
+                                return f"🟢 **MuJoCo GUI Opened**: Viewer launched for `{os.path.basename(entrypoint)}` (PID: {res.get('pid')}). Check your desktop for the MuJoCo simulation window."
                             return f"🔴 **Could not open MuJoCo GUI**: {res.get('error', 'Unknown error.')}"
                         return "🔴 **Could not open MuJoCo GUI**: Model entrypoint file not found on disk."
 
