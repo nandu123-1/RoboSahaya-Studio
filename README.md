@@ -15,8 +15,8 @@
 3. **Ergonomic Two-Channel Output:** 
    - **Voice Script (Gnani Timbre TTS):** Short, natural, conversational explanation for speech (no spoken terminal command strings).
    - **Interactive Terminal Card:** Detailed evidence list, confidence levels, caveats, and safe copyable CLI verification commands.
-4. **Safety First:** Read-only inspection. The AI never controls motors, modifies files, or executes arbitrary shell code.
-5. **Zero-Dependency Evaluator Mode (`--mock-mode`):** Allows judges on Windows, macOS, or clean Linux machines without ROS 2 installed to test and reproduce the full voice-to-diagnosis pipeline effortlessly.
+4. **Safety First:** The diagnostic copilot is read-only. Studio changes only its generated task workspace, uses fixed build and launch profiles, and requires an explicit approval action before applying a patch.
+5. **Replay Mode:** Fixture-backed diagnostics work without ROS 2. Studio labels them as replay evidence and does not claim a build, launch, or sensor test.
 
 ---
 
@@ -33,7 +33,7 @@ flowchart TD
     F1 --> G[Structured Evidence Bundle]
     F2 --> G
     G --> H[Deterministic Diagnostic Engine]
-    H --> I{Evon v3.3 Available?}
+    H --> I{Reasoning endpoint configured?}
     I -- Fallback / Baseline --> J[Rule-Based Diagnosis & Analogy Matcher]
     I -- Yes --> K[Evon Hypotheses Ranking]
     K --> L[Schema & Command Catalogue Validation]
@@ -103,15 +103,15 @@ Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
-Fill in your `GNANI_API_KEY` from the [Gnani AI Dashboard](https://app.gnani.ai/voice). If no key is set, the application automatically runs with mock speech simulation for offline grading.
+Configure STT and TTS credentials separately if you have access. Without credentials, speech services are unavailable; typed queries and deterministic reasoning remain available.
 
 ### 4. Run the Application
 ```bash
-# Run in zero-dependency Mock Replay Mode (Instant evaluation):
-python src/robosahaya/app.py --mode mock
+# Run fixture-backed diagnostics without ROS 2:
+PYTHONPATH=src python -m robosahaya.app --mode mock
 
 # Or run in Live ROS 2 mode on a robot/simulation host:
-python src/robosahaya/app.py --mode live
+PYTHONPATH=src python -m robosahaya.app --mode live
 ```
 Open **`http://127.0.0.1:7860`** in your browser.
 
@@ -124,15 +124,7 @@ RoboSahaya comes with a unit and integration test suite:
 ```bash
 pytest tests/
 ```
-Output:
-```text
-tests/integration/test_pipeline.py .                                     [  5%]
-tests/unit/test_command_catalogue.py ...                                 [ 23%]
-tests/unit/test_diagnostics.py .....                                     [ 52%]
-tests/unit/test_grounding.py .....                                       [ 82%]
-tests/unit/test_mock_inspector.py ...                                    [100%]
-============================== 17 passed in 0.14s ==============================
-```
+Test results depend on the checked-out revision and installed ROS environment; no fixed pass count is claimed here.
 
 ---
 
@@ -153,9 +145,7 @@ The LLM is strictly prohibited from executing or hallucinating shell commands. A
 ## 🏆 Great Indian AI Internship Challenge Details
 
 - **Organizer:** Gnani AI
-- **Models Utilized:** 
-  - **Prisma (STT):** Multi-lingual Indian & Telugu-English speech-to-text.
-  - **Timbre (TTS):** Indian-accented natural voice synthesis for hands-free diagnostic scripts.
-  - **Evon (v3.3):** Open-weight reasoning integration specification.
+- **Optional provider integrations:** Gnani STT and TTS use separately configured endpoints. A reasoning endpoint is optional; deterministic rules supply responses when it is not configured.
 - **Hashtags:** `#GnaniAI` `#GreatIndianAIInternshipChallenge`
 - **License:** Apache 2.0
+# RoboSahaya-Studio
