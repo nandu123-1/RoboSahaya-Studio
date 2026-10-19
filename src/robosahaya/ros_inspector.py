@@ -21,6 +21,8 @@ try:
     from rcl_interfaces.msg import ParameterType
     import tf2_ros
     import rclpy.time
+    from rclpy.qos import qos_profile_sensor_data
+    from rosidl_runtime_py.utilities import get_message
     RCLPY_AVAILABLE = True
 except ImportError:
     RCLPY_AVAILABLE = False
@@ -65,17 +67,28 @@ class LiveRclpyInspector(BaseInspector):
         nodes_and_ns = self.node.get_node_names_and_namespaces()
         full_node_names = [f"{ns.rstrip('/')}/{name}" if ns != "/" else f"/{name}" for name, ns in nodes_and_ns]
 
-        # Check clock activity
-        clock_active = "/clock" in names_and_types
-        endpoints_summary = {}
+        endpoints_summary = {
+            topic: self.inspect_topic_endpoints(topic)
+            for topic in names_and_types
+        }
+        frames = []
+        try:
+            frame_dump = self.tf_buffer.all_frames_as_string()
+            import re
+            frames = sorted(set(re.findall(r"(?:Frame|frame)\s+([A-Za-z0-9_./-]+)", frame_dump)))
+        except Exception:
+            pass
+        clock = self.sample_messages("/clock", duration_sec=0.35) if "/clock" in names_and_types else None
+        clock_active = bool(clock and clock.messages_received > 0)
 
         return GraphSnapshot(
             nodes=full_node_names,
             topics={k: list(v) for k, v in names_and_types.items()},
             endpoints=endpoints_summary,
             parameters={},
-            tf_frames=[],
-            clock_active=clock_active
+            tf_frames=frames,
+            clock_active=clock_active,
+            clock_advancing=(clock.clock_advancing if clock else False)
         )
 
     def inspect_topic_endpoints(self, topic: str) -> TopicEndpointEvidence:
@@ -171,14 +184,116 @@ class LiveRclpyInspector(BaseInspector):
             )
 
     def sample_messages(self, topic: str, duration_sec: float = 1.0) -> MessageSampleEvidence:
-        # Check topic existence
         names_and_types = dict(self.node.get_topic_names_and_types())
-        if topic not in names_and_types or not names_and_types[topic]:
-            return MessageSampleEvidence(topic=topic, messages_received=0, sample_window_sec=duration_sec)
+        try:
+            if topic in names_and_types and names_and_types[topic]:
+                message_type = get_message(names_and_types[topic][0])
+            elif topic == "/scan":
+                from sensor_msgs.msg import LaserScan
+                message_type = LaserScan
+            elif topic == "/camera/image_raw":
+                from sensor_msgs.msg import Image
+                message_type = Image
+            elif topic == "/joint_states":
+                from sensor_msgs.msg import JointState
+                message_type = JointState
+            else:
+                return MessageSampleEvidence(topic=topic, messages_received=0, sample_window_sec=duration_sec,
+                                             payload_valid=False, validation_detail="Topic is absent from the ROS graph.")
+        except Exception as exc:
+            return MessageSampleEvidence(topic=topic, sample_window_sec=duration_sec,
+                                         sampling_error=f"Could not load ROS message type: {exc}")
 
-        # For bounded sampling, sleep observation window
-        time.sleep(duration_sec)
-        return MessageSampleEvidence(topic=topic, messages_received=0, sample_window_sec=duration_sec)
+        received = []
+        lock = threading.Lock()
+        def callback(message):
+            valid, detail = self._validate_payload(topic, message)
+            with lock:
+                received.append((message, valid, detail, time.monotonic()))
+
+        subscription = None
+        observation_window = max(0.05, min(float(duration_sec), 10.0))
+        try:
+            subscription = self.node.create_subscription(
+                message_type, topic, callback, qos_profile_sensor_data
+            )
+            if hasattr(self, "executor") and hasattr(self.executor, "wake"):
+                self.executor.wake()
+
+            start_t = time.monotonic()
+            deadline = start_t + observation_window
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+                if hasattr(self, "executor") and hasattr(self.executor, "wake"):
+                    self.executor.wake()
+                with lock:
+                    if len(received) >= 10:
+                        break
+        except Exception as exc:
+            return MessageSampleEvidence(topic=topic, sample_window_sec=duration_sec,
+                                         sampling_error=f"Subscription sampling failed: {exc}")
+        finally:
+            if subscription is not None:
+                self.node.destroy_subscription(subscription)
+                if hasattr(self, "executor") and hasattr(self.executor, "wake"):
+                    self.executor.wake()
+
+        valid_count = sum(1 for _, valid, _, _ in received if valid is True)
+        invalid_count = sum(1 for _, valid, _, _ in received if valid is False)
+        elapsed = received[-1][3] - received[0][3] if len(received) > 1 else 0.0
+        frequency = (len(received) - 1) / elapsed if elapsed > 0 else 0.0
+        latest = received[-1] if received else None
+        clock_values = []
+        for message, _, _, _ in received:
+            stamp = getattr(message, "clock", None)
+            if stamp is not None:
+                clock_values.append(int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec))
+        snippet = None
+        if latest:
+            message = latest[0]
+            if hasattr(message, "ranges"):
+                snippet = f"ranges={len(message.ranges)}, frame={message.header.frame_id!r}"
+            elif hasattr(message, "data"):
+                snippet = f"width={getattr(message, 'width', '?')}, height={getattr(message, 'height', '?')}, data_bytes={len(message.data)}"
+            else:
+                snippet = f"type={type(message).__name__}"
+        return MessageSampleEvidence(
+            topic=topic, messages_received=len(received), sample_window_sec=observation_window,
+            frequency_hz=frequency, latest_message_snippet=snippet,
+            valid_samples=valid_count, invalid_samples=invalid_count,
+            payload_valid=(False if invalid_count else (True if received and valid_count == len(received) else None)),
+            clock_advancing=(clock_values[-1] > clock_values[0] if len(clock_values) > 1 else None),
+            validation_detail=latest[2] if latest else "No messages received during the observation window."
+        )
+
+    @staticmethod
+    def _validate_payload(topic: str, message) -> tuple[Optional[bool], str]:
+        if hasattr(message, "ranges"):
+            import math
+            ranges = list(message.ranges)
+            finite = [value for value in ranges if math.isfinite(value)]
+            if not ranges:
+                return False, "LaserScan contains no range samples."
+            if message.angle_increment <= 0 or message.range_min < 0 or message.range_max <= message.range_min:
+                return False, "LaserScan angular or range metadata is invalid."
+            invalid = [value for value in ranges if math.isnan(value) or
+                       (math.isfinite(value) and not message.range_min <= value <= message.range_max)]
+            if invalid:
+                return False, f"{len(invalid)}/{len(ranges)} range values are NaN or outside declared limits."
+            return True, f"{len(finite)}/{len(ranges)} finite ranges ({len(ranges) - len(finite)} no-return values); frame={message.header.frame_id!r}."
+        if hasattr(message, "width") and hasattr(message, "height") and hasattr(message, "data"):
+            if message.width <= 0 or message.height <= 0 or not message.data:
+                return False, "Image dimensions or data payload are empty."
+            if getattr(message, "step", 0) > 0 and len(message.data) < message.step * message.height:
+                return False, "Image data is shorter than step multiplied by height."
+            return True, f"Image payload is {message.width}x{message.height}, {len(message.data)} bytes."
+        if hasattr(message, "name") and hasattr(message, "position"):
+            if not message.name or len(message.position) == 0:
+                return False, "JointState contains no joint names or positions."
+            if len(message.name) != len(message.position):
+                return False, f"JointState name count ({len(message.name)}) != position count ({len(message.position)})."
+            return True, f"JointState with {len(message.name)} joints: {', '.join(message.name[:4])}."
+        return None, f"Received {type(message).__name__}; semantic payload validation is not implemented for this type."
 
     def shutdown(self):
         if hasattr(self, 'executor'):

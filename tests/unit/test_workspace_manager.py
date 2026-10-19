@@ -42,3 +42,20 @@ def test_inject_fault_and_apply_patch(temp_ws_manager):
     assert succ_res["success"] is True
     assert (ws / "bridge.yaml.bak").exists()
     assert 'ros_topic_name: "/scan"' in (ws / "bridge.yaml").read_text()
+
+
+def test_assemble_and_validate_robotic_arm_template(temp_ws_manager):
+    task_id = "test_arm_task_01"
+    ws = temp_ws_manager.assemble_simulation_template(task_id, "robotic_arm_6dof", world_id="tabletop_world")
+    assert ws.exists()
+    assert (ws / "model.urdf").exists()
+    assert (ws / "bridge.yaml").exists()
+    assert (ws / "manifest.json").exists()
+
+    # Validate syntax
+    val = temp_ws_manager.validate_workspace_files(ws)
+    assert val["valid"] is True
+    assert val["checks"]["urdf_xml"] == "VALID"
+    assert val["checks"]["bridge_yaml"] == "VALID"
+    assert val["checks"]["launch_file"] == "VALID_PYTHON_SYNTAX"
+

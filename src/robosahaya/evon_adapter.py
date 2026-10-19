@@ -11,7 +11,7 @@ from robosahaya.evidence_models import (
 )
 from robosahaya.command_catalogue import CommandCatalogue
 
-EVON_SYSTEM_PROMPT = """You are RoboSahaya's AI Reasoning Engine, powered by Gnani AI Evon v3.3.
+EVON_SYSTEM_PROMPT = """You are RoboSahaya's robotics reasoning service.
 You are an expert robotics systems engineer diagnosing ROS 2 failures.
 You will be provided with an Evidence Bundle containing atomic observations from a live or inspected ROS 2 system.
 
@@ -45,11 +45,11 @@ You must respond ONLY with valid JSON conforming to this schema:
 """
 
 class EvonReasoningAdapter:
-    """Adapter for Gnani AI Evon v3.3 30B MoE reasoning model."""
+    """Optional OpenAI-compatible reasoning endpoint configured by the operator."""
 
     def __init__(self, endpoint_url: Optional[str] = None, api_key: Optional[str] = None):
         self.endpoint_url = endpoint_url or getattr(settings, "EVON_API_URL", "http://localhost:8000/v1/chat/completions")
-        self.api_key = api_key or settings.GNANI_API_KEY
+        self.api_key = api_key or settings.EVON_API_KEY
         self.local_model_dir = settings.LOCAL_MODEL_DIR
         self.tokenizer = None
         self._init_local_tokenizer()
@@ -72,25 +72,32 @@ class EvonReasoningAdapter:
         return f"<|im_start|>system\n{system_msg}<|im_end|>\n<|im_start|>user\n{user_msg}<|im_end|>\n<|im_start|>assistant\n"
 
     def get_local_model_info(self) -> Dict[str, Any]:
-        has_config = (self.local_model_dir / "config.json").exists()
-        has_index = (self.local_model_dir / "model.safetensors.index.json").exists()
-        shard_count = len(list(self.local_model_dir.glob("model-*.safetensors")))
+        config_file = self.local_model_dir / "config.json"
+        has_config = config_file.is_file()
+        shard_count = len(list(self.local_model_dir.glob("*.safetensors")))
+        model_name = "unconfigured"
+        if has_config:
+            try:
+                model_name = json.loads(config_file.read_text(encoding="utf-8")).get("model_type", "local model")
+            except Exception:
+                model_name = "local model (config unreadable)"
         return {
             "model_name": "gnani-evon-v3.3",
-            "parameters": "30B MoE (~3.5B active)",
-            "architecture": "NemotronHForCausalLM (Mamba2 + Transformer)",
+            "architecture": model_name,
             "local_dir": str(self.local_model_dir),
-            "weights_present": has_config and has_index and shard_count == 13,
+            "weights_present": has_config and shard_count > 0,
             "shard_count": shard_count,
             "expected_shards": 13,
             "has_tokenizer": self.tokenizer is not None,
             "vocab_size": self.tokenizer.get_vocab_size() if self.tokenizer else 163072,
-            "max_context": 131072
+            "endpoint_configured": bool(self.endpoint_url),
+            "credentials_configured": bool(self.api_key),
         }
 
     @property
     def is_live(self) -> bool:
-        return bool(self.api_key and self.api_key != "your_gnani_api_key_here")
+        return bool(self.endpoint_url and self.api_key and
+                    self.api_key.lower() not in {"your_gnani_api_key_here", "change-me", "changeme", "placeholder"})
 
     def _build_user_prompt(self, target_entity: str, entity_type: str, evidence: List[EvidenceRecord], query_text: str) -> str:
 
@@ -120,40 +127,54 @@ class EvonReasoningAdapter:
         user_query: str = ""
     ) -> Optional[DiagnosisResponse]:
         """
-        Invoke Gnani AI Evon reasoning model on the evidence bundle.
-        Falls back gracefully if endpoint is unreachable.
+        Invoke the configured endpoint. No simulated model output is returned.
         """
         user_prompt = self._build_user_prompt(target_entity, entity_type, evidence, user_query)
 
         if not self.is_live:
-            # High-fidelity simulated AI reasoning for offline demonstration / evaluation
-            return self._simulated_ai_reasoning(target_entity, entity_type, evidence, user_query)
+            return None
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "evon-v3.3",
+            "model": getattr(settings, "EVON_MODEL_ID", "evon"),
             "messages": [
                 {"role": "system", "content": EVON_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
             ],
             "temperature": 0.2,
-            "max_tokens": 800
+            "max_tokens": 1024
         }
 
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             try:
                 resp = await client.post(self.endpoint_url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 raw_content = data["choices"][0]["message"]["content"]
-                parsed = json.loads(raw_content)
-                return self._parse_llm_json(parsed)
+                clean_content = raw_content.strip()
+                if clean_content.startswith("```json"):
+                    clean_content = clean_content[7:]
+                elif clean_content.startswith("```"):
+                    clean_content = clean_content[3:]
+                if clean_content.endswith("```"):
+                    clean_content = clean_content[:-3]
+                clean_content = clean_content.strip()
+
+                parsed = json.loads(clean_content)
+                result = self._parse_llm_json(parsed)
+                result.reasoning_source = "evon"
+                result.evidence_records = evidence
+                valid_ids = {item.evidence_id for item in evidence}
+                result.observations = [oid for oid in result.observations if oid in valid_ids] or list(valid_ids)
+                for h in result.hypotheses:
+                    h.evidence_ids = [eid for eid in h.evidence_ids if eid in valid_ids] or list(valid_ids)
+                return result
             except Exception as ex:
-                print(f"[Evon Reasoning] Live inference failed ({ex}), falling back to simulated AI reasoning.")
-                return self._simulated_ai_reasoning(target_entity, entity_type, evidence, user_query)
+                print(f"[Reasoning endpoint] Request failed ({type(ex).__name__}): {ex}")
+                return None
 
     def _simulated_ai_reasoning(
         self,
@@ -162,9 +183,7 @@ class EvonReasoningAdapter:
         evidence: List[EvidenceRecord],
         user_query: str
     ) -> DiagnosisResponse:
-        """
-        Simulates Evon v3.3's dynamic generative reasoning over the structured evidence bundle.
-        """
+        """Simulates Evon v3.3's dynamic reasoning over structured evidence for offline demonstration / testing."""
         evidence_ids = [e.evidence_id for e in evidence]
         
         q_lower = user_query.lower()

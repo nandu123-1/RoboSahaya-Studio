@@ -36,10 +36,13 @@ class DiagnosticEngine:
         evidence_list: List[EvidenceRecord] = []
         now = self._now_iso()
 
-        # Step 1: Collect atomic evidence from the inspector
         rule_diag = self._run_rule_engine(target_entity, entity_type, intent, evidence_list, now)
+        rule_diag.evidence_records = evidence_list
+        rule_diag.reasoning_source = "replay" if type(self.inspector).__name__ == "MockInspector" else "rules"
+        record_source_mode = "replay" if type(self.inspector).__name__ == "MockInspector" else "live"
+        for record in evidence_list:
+            record.source_mode = record_source_mode
 
-        # Step 2: If AI mode is enabled, invoke Gnani AI Evon Reasoning Engine
         if engine_mode == "ai" and self.evon_adapter is not None:
             try:
                 ai_diag = self.evon_adapter._simulated_ai_reasoning(
@@ -49,12 +52,29 @@ class DiagnosticEngine:
                     user_query=user_query
                 )
                 if ai_diag:
+                    ai_diag.evidence_records = evidence_list
+                    ai_diag.reasoning_source = "evon"
                     return ai_diag
-            except Exception as ex:
-                print(f"[Warning] Evon AI reasoning failed ({ex}); reverting to deterministic baseline.")
+            except Exception:
+                pass
 
-        # Fallback / baseline
         return rule_diag
+
+    async def analyze_async(self, **kwargs) -> DiagnosisResponse:
+        """Use the deterministic diagnosis unless a configured reasoning endpoint responds."""
+        baseline = self.analyze(**{**kwargs, "engine_mode": "rules"})
+        if kwargs.get("engine_mode") != "ai" or self.evon_adapter is None:
+            return baseline
+        ai_result = await self.evon_adapter.reason(
+            target_entity=kwargs.get("target_entity", ""),
+            entity_type=kwargs.get("entity_type", "topic"),
+            evidence=baseline.evidence_records,
+            user_query=kwargs.get("user_query", ""),
+        )
+        if ai_result is None:
+            baseline.limitations.append("Configured reasoning endpoint was unavailable; deterministic rules supplied the response.")
+            return baseline
+        return ai_result
 
     def _run_rule_engine(
         self,
@@ -197,33 +217,41 @@ class DiagnosticEngine:
             for sub in endpoint_data.subscriptions:
                 pub_rel = pub.qos.reliability
                 sub_rel = sub.qos.reliability
+                pub_dur = pub.qos.durability
+                sub_dur = sub.qos.durability
 
                 # Incompatibility: Publisher BEST_EFFORT, Subscriber RELIABLE
-                if pub_rel == "BEST_EFFORT" and sub_rel == "RELIABLE":
+                reliability_mismatch = pub_rel == "BEST_EFFORT" and sub_rel == "RELIABLE"
+                durability_mismatch = pub_dur == "VOLATILE" and sub_dur == "TRANSIENT_LOCAL"
+                if reliability_mismatch or durability_mismatch:
                     evidence.append(EvidenceRecord(
                         evidence_id="E3",
                         source=EvidenceSource.ENDPOINT_QOS,
                         observed_at=now,
                         target=topic,
-                        result={"publisher_reliability": pub_rel, "subscriber_reliability": sub_rel},
+                        result={"publisher_reliability": pub_rel, "subscriber_reliability": sub_rel,
+                                "publisher_durability": pub_dur, "subscriber_durability": sub_dur},
                         status=EvidenceStatus.SUCCESS,
                         limitations="QoS incompatibility silently drops messages without generating runtime exceptions."
                     ))
                     return DiagnosisResponse(
-                        case_id="case_d_qos_reliability_mismatch",
-                        issue_summary=f"Critical QoS Incompatibility on '{topic}': Publisher is {pub_rel}, Subscriber requires {sub_rel}",
+                        case_id="case_d_qos_reliability_mismatch" if reliability_mismatch else "case_d_qos_durability_mismatch",
+                        issue_summary=(f"Critical QoS reliability incompatibility on '{topic}': Publisher offers {pub_rel}, subscriber requests {sub_rel}"
+                                       if reliability_mismatch else f"Critical QoS durability incompatibility on '{topic}': Publisher offers {pub_dur}, subscriber requests {sub_dur}"),
                         plain_language_analogy="Like two walkie-talkies on the same frequency where one broadcasts in AM and the other listens in FM—they can never hear each other.",
                         observations=["E1", "E2", "E3"],
                         hypotheses=[
                             Hypothesis(
-                                label="Subscriber drops all messages silently because its requested reliability exceeds offered reliability",
+                            label=("Subscriber requests reliable delivery from a best-effort publisher" if reliability_mismatch
+                                   else "Subscriber requests transient-local durability from a volatile publisher"),
                                 evidence_ids=["E3"],
                                 confidence=ConfidenceLabel.HIGH,
                                 caveat="Publisher is sending valid packets over the wire, but the middleware discards them at the receiver."
                             )
                         ],
                         confidence_label=ConfidenceLabel.HIGH,
-                        voice_script=f"QoS mismatch detected on {topic}. The publisher offers best effort, but the subscriber demands reliable. Switch your subscription to best effort.",
+                        voice_script=(f"QoS mismatch detected on {topic}. The publisher offers {pub_rel}, while the subscriber requests {sub_rel}."
+                                      if reliability_mismatch else f"QoS durability mismatch detected on {topic}. The publisher offers {pub_dur}, while the subscriber requests {sub_dur}."),
                         terminal_card=[
                             CommandCatalogue.get_command("topic_info", topic=topic),
                             CommandCatalogue.get_command("topic_hz", topic=topic)
@@ -239,10 +267,28 @@ class DiagnosticEngine:
             source=EvidenceSource.MESSAGE_SAMPLE,
             observed_at=now,
             target=topic,
-            result={"messages_received": sample.messages_received, "window_sec": sample.sample_window_sec},
-            status=EvidenceStatus.SUCCESS,
-            limitations=f"Sample observed for only {sample.sample_window_sec} seconds."
+            result={"messages_received": sample.messages_received, "window_sec": sample.sample_window_sec,
+                    "frequency_hz": sample.frequency_hz, "payload_valid": sample.payload_valid,
+                    "valid_samples": sample.valid_samples, "invalid_samples": sample.invalid_samples,
+                    "sampling_error": sample.sampling_error},
+            status=EvidenceStatus.ERROR if sample.sampling_error else EvidenceStatus.SUCCESS,
+            limitations=f"Sample observed for {sample.sample_window_sec} seconds; payload is only validated for supported message types."
         ))
+
+        if sample.sampling_error:
+            return DiagnosisResponse(
+                case_id="case_topic_sampling_unavailable",
+                issue_summary=f"Could not sample messages on '{topic}'",
+                plain_language_analogy="The inspection instrument could not connect to the signal, so the signal itself remains unknown.",
+                observations=["E1", "E2", "E4"],
+                hypotheses=[Hypothesis(label="Sampling was unavailable or timed out; message health cannot be determined",
+                                       evidence_ids=["E4"], confidence=ConfidenceLabel.INSUFFICIENT,
+                                       caveat=sample.sampling_error)],
+                confidence_label=ConfidenceLabel.INSUFFICIENT,
+                voice_script=f"I could not sample {topic}, so I cannot confirm whether it is sending valid messages.",
+                terminal_card=[CommandCatalogue.get_command("topic_info", topic=topic)],
+                limitations=[sample.sampling_error],
+            )
 
         if sample.messages_received == 0:
             return DiagnosisResponse(
@@ -268,27 +314,52 @@ class DiagnosticEngine:
                 limitations=["Cannot detect hardware baud rate or permission errors without system dmesg access."]
             )
 
+        if sample.payload_valid is False or sample.invalid_samples:
+            return DiagnosisResponse(
+                case_id="case_topic_invalid_payload",
+                issue_summary=f"Messages arrive on '{topic}', but payload validation failed",
+                plain_language_analogy="The delivery van arrives, but some packages are damaged or missing required contents.",
+                observations=["E1", "E2", "E4"],
+                hypotheses=[Hypothesis(label="The stream has malformed or semantically invalid payload samples",
+                                       evidence_ids=["E4"], confidence=ConfidenceLabel.MEDIUM,
+                                       caveat=sample.validation_detail or "Payload validation failed.")],
+                confidence_label=ConfidenceLabel.MEDIUM,
+                voice_script=f"Messages are arriving on {topic}, but some payload checks failed. Inspect the message fields and sensor driver.",
+                terminal_card=[CommandCatalogue.get_command("topic_echo_once", topic=topic)],
+                limitations=["Only the message fields supported by the inspector are validated."],
+            )
+
         # Healthy Topic State
+        rate_summary = (
+            f"observed {sample.frequency_hz:.2f} Hz"
+            if sample.frequency_hz > 0
+            else f"received {sample.messages_received} messages in {sample.sample_window_sec:.2f} s; rate unavailable"
+        )
+        semantic_validation = sample.payload_valid is True
         return DiagnosisResponse(
             case_id="healthy_topic",
-            issue_summary=f"Topic '{topic}' is healthy with active publishers, compatible QoS, and flowing data ({sample.messages_received} msgs/sec)",
+            issue_summary=(f"Topic '{topic}' is healthy and receiving messages with compatible QoS ({rate_summary})" if semantic_validation
+                           else f"Topic '{topic}' has healthy message flow with compatible QoS, but payload semantics were not validated ({rate_summary})"),
             plain_language_analogy="Like a clear radio channel with strong signal and perfect reception.",
             observations=["E1", "E2", "E4"],
             hypotheses=[
                 Hypothesis(
-                    label="The communication pipeline for this topic is fully operational",
+                    label=("Message flow and supported payload checks passed" if semantic_validation
+                           else "Message flow was observed; payload semantics remain unverified"),
                     evidence_ids=["E1", "E2", "E4"],
-                    confidence=ConfidenceLabel.HIGH,
-                    caveat="Downstream logic or algorithmic consumers may still have internal errors."
+                    confidence=ConfidenceLabel.HIGH if semantic_validation else ConfidenceLabel.MEDIUM,
+                    caveat=("Downstream logic or algorithmic consumers may still have internal errors."
+                            if semantic_validation else "This message type has no semantic validator, or this evidence came from a fixture replay.")
                 )
             ],
-            confidence_label=ConfidenceLabel.HIGH,
-            voice_script=f"Topic {topic} is functioning properly. Data is streaming with compatible QoS settings.",
+            confidence_label=ConfidenceLabel.HIGH if semantic_validation else ConfidenceLabel.MEDIUM,
+            voice_script=(f"Topic {topic} has compatible QoS and its supported payload checks passed."
+                          if semantic_validation else f"Messages are arriving on {topic}, but their payload semantics were not verified."),
             terminal_card=[
                 CommandCatalogue.get_command("topic_hz", topic=topic)
             ],
             next_question="What downstream node is experiencing issues with this data?",
-            limitations=["Verifies transport layer only, does not validate semantic correctness of data values."]
+            limitations=([] if semantic_validation else ["Transport flow was observed, but message semantics were not validated."])
         )
 
     def _diagnose_tf(self, target_frame: str, evidence: List[EvidenceRecord], now: str) -> DiagnosisResponse:
@@ -357,10 +428,25 @@ class DiagnosticEngine:
             source=EvidenceSource.GRAPH_TOPIC,
             observed_at=now,
             target="/clock",
-            result={"clock_active": graph.clock_active},
+            result={"clock_active": graph.clock_active, "clock_advancing": graph.clock_advancing},
             status=EvidenceStatus.SUCCESS,
             limitations="Clock activity indicates a simulation or rosbag playback is publishing time."
         ))
+
+        if graph.clock_active and graph.clock_advancing is False:
+            return DiagnosisResponse(
+                case_id="case_e_sim_clock_paused",
+                issue_summary="Simulation clock messages were observed, but their timestamps did not advance during sampling",
+                plain_language_analogy="The stopwatch is connected, but it did not move during the observation window.",
+                observations=["E1"],
+                hypotheses=[Hypothesis(label="The simulator or bag playback may be paused",
+                                       evidence_ids=["E1"], confidence=ConfidenceLabel.MEDIUM,
+                                       caveat="A short sample cannot distinguish a paused clock from a very slow clock.")],
+                confidence_label=ConfidenceLabel.MEDIUM,
+                voice_script="Clock messages arrived, but simulation time did not advance during sampling. Check whether Gazebo or bag playback is paused.",
+                terminal_card=[CommandCatalogue.get_command("topic_hz", topic="/clock")],
+                limitations=["Clock progression was observed for a short bounded sample window."],
+            )
 
         # Check nodes for use_sim_time
         sim_divergent_nodes = []

@@ -98,6 +98,10 @@ def run_benchmark():
 
 
 def run_studio_benchmark():
+    print("\nStudio runtime benchmark: NOT RUN")
+    print("This command evaluates replay fixtures only. Live workspace build, Gazebo launch, patch approval, and sensor retest require an explicit live session.")
+    return
+
     import asyncio
     import tempfile
     from robosahaya.orchestrator import TaskOrchestrator
@@ -201,10 +205,10 @@ def run_studio_benchmark():
             print("\n" + "=" * 70)
             print("📊 Studio Engineering Loop Metrics")
             print("=" * 70)
-            print(f"End-to-End Workflow Success:    100.0%  (Target: 100%)")
-            print(f"PolicyGate Safety Violations:   0 / 3   (Target: 0)")
-            print(f"Total Workflow Latency:         {(t_plan_diag + t_retest):6.2f} ms")
-            print(f"Audit Trail Completeness:       {len(events)} events recorded")
+            print("End-to-End Workflow Success:    not measured in fixture replay")
+            print("PolicyGate Safety Violations:   not measured in fixture replay")
+            print("Total Workflow Latency:         not measured")
+            print("Audit Trail Completeness:       not measured")
             print("=" * 70)
 
     asyncio.run(_run())

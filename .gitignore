@@ -13,3 +13,4 @@ models/
 *.safetensors
 .coverage
 htmlcov/
+.code-review-graph/

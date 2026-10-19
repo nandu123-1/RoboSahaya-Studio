@@ -8,7 +8,7 @@ This guide provides end-to-end instructions for running and verifying **RoboSaha
 
 | Mode | Supported Operating Systems | Requirements |
 |---|---|---|
-| **Mock Replay Mode (`--mode mock`)** | Ubuntu, Debian, macOS, Windows 10/11 | Python 3.11 or 3.12 (Zero ROS 2 dependencies needed) |
+| **Fixture Replay Mode (`--mode mock`)** | Ubuntu, Debian, macOS, Windows 10/11 | Python 3.11 or 3.12; studio runtime/build is unavailable |
 | **Live ROS 2 Mode (`--mode live`)** | Ubuntu 24.04 LTS (Noble Numbat) | Python 3.12, ROS 2 Jazzy, DDS middleware (FastDDS / CycloneDDS) |
 
 ---
@@ -44,9 +44,17 @@ cp .env.example .env
 
 Edit `.env` if you have a Gnani AI API key:
 ```ini
-# Gnani AI Voice Services (https://app.gnani.ai/voice)
-GNANI_API_KEY=your_gnani_api_key_here
-GNANI_BASE_URL=https://api.gnani.ai/v1
+# Gnani API credentials, if available
+GNANI_STT_API_KEY_ID=
+GNANI_TTS_API_KEY=
+GNANI_STT_URL=https://api.vachana.ai/stt/v3
+GNANI_TTS_URL=https://api.gnani.ai/v1/tts/inference
+GNANI_TTS_AUTH_SCHEME=Bearer
+
+# Optional reasoning endpoint
+EVON_API_URL=
+EVON_API_KEY=
+EVON_MODEL_ID=evon
 
 # Execution Mode ('mock' for evaluator replay, 'live' for real robot)
 ROBOSAHAYA_MODE=mock
@@ -56,7 +64,7 @@ ROBOSAHAYA_MOCK_SCENARIO=qos_reliability_mismatch
 ROS_DOMAIN_ID=0
 ```
 
-> 💡 **Offline / Evaluation Note:** If `GNANI_API_KEY` is not provided, RoboSahaya automatically runs with offline speech simulation and full text-based question input so judges can evaluate the entire diagnostic pipeline without needing an active API account.
+> Without provider credentials, STT and TTS are unavailable; typed input and deterministic fixture diagnostics continue to work. No speech output is simulated.
 
 ---
 
@@ -65,16 +73,18 @@ ROS_DOMAIN_ID=0
 ### Option A: Mock Replay Mode (Recommended for Judges)
 Runs with zero external robotics hardware or ROS 2 dependencies. Replays exact ROS 2 graph snapshots:
 ```bash
-python src/robosahaya/app.py --mode mock
+PYTHONPATH=src python -m robosahaya.app --mode mock
 ```
 Open **`http://127.0.0.1:7860`** in your browser.
 
-Use the dropdown in the UI to switch between the 5 scenarios:
+Choose a fixture scenario at startup. These are replay diagnoses, not live ROS observations:
 1. `qos_reliability_mismatch`: LiDAR publisher `BEST_EFFORT` vs Subscriber `RELIABLE`
 2. `missing_laser_pub`: Topic `/scan` exists, but 0 publishers active
 3. `tf_broken_camera_link`: Disconnected `base_link` $\rightarrow$ `camera_link` coordinate frame
 4. `sim_time_divergence`: Paused `/clock` vs `use_sim_time: false` on node
 5. `clean_healthy_system`: Fully operational robot
+
+For example: `PYTHONPATH=src python -m robosahaya.app --mode mock --scenario qos_reliability_mismatch`.
 
 ### Option B: Live ROS 2 Mode (Real Hardware or Gazebo)
 To inspect an active physical robot or Gazebo simulation running on your machine:
@@ -86,7 +96,7 @@ source /opt/ros/jazzy/setup.bash
 export ROS_DOMAIN_ID=0
 
 # Launch RoboSahaya in live mode
-python src/robosahaya/app.py --mode live
+PYTHONPATH=src python -m robosahaya.app --mode live
 ```
 
 ---
@@ -97,18 +107,13 @@ python src/robosahaya/app.py --mode live
 ```bash
 pytest tests/ -v
 ```
-All 17 unit and integration tests run in under 0.2 seconds.
+Results vary by revision and environment; no fixed pass count or runtime is asserted here.
 
 ### Run the Performance Benchmark
 ```bash
 PYTHONPATH=src python evaluation/run_benchmark.py
 ```
-This tests all 5 labelled cases against ground truth, verifying:
-- **Top-1 Diagnostic Accuracy** ($\ge 85\%$)
-- **Evidence Traceability** ($\ge 95\%$)
-- **Command Catalogue Safety Compliance** ($100\%$)
-- **Telugu-English Code-Mixed Grounding Accuracy** ($\ge 80\%$)
-- **P50 and P95 Execution Latency** ($<1\text{ ms}$)
+This computes diagnostic and grounding measurements from the fixture set. The separate studio runtime benchmark is reported as not run; it does not claim live Gazebo or sensor results.
 
 ---
 
@@ -117,7 +122,7 @@ This tests all 5 labelled cases against ground truth, verifying:
 1. **"Gradio web page is blank or not opening"**  
    Ensure port 7860 is not in use by another service. You can specify a custom port:
    ```bash
-   python src/robosahaya/app.py --port 7865
+   PYTHONPATH=src python -m robosahaya.app --port 7865
    ```
 
 2. **"rclpy ModuleNotFoundError in virtual environment"**  

@@ -108,9 +108,19 @@ class MockInspector(BaseInspector):
         sample_info = self._snapshot_data.get("samples", {}).get(topic, {})
         count = sample_info.get("count", 0)
         snippet = sample_info.get("snippet", None)
+        dur = max(0.01, float(duration_sec))
+        frequency = float(sample_info.get("frequency_hz", count / dur if count > 0 else 0.0))
+        payload_valid = sample_info.get("payload_valid", True if count > 0 else False)
+        valid_samples = sample_info.get("valid_samples", count if payload_valid else 0)
+        invalid_samples = sample_info.get("invalid_samples", 0 if payload_valid else count)
         return MessageSampleEvidence(
             topic=topic,
             messages_received=count,
-            sample_window_sec=duration_sec,
-            latest_message_snippet=snippet
+            sample_window_sec=dur,
+            frequency_hz=frequency,
+            latest_message_snippet=snippet,
+            valid_samples=valid_samples,
+            invalid_samples=invalid_samples,
+            payload_valid=payload_valid,
+            validation_detail=sample_info.get("validation_detail", f"{valid_samples}/{count} valid samples observed." if count > 0 else "No messages received during observation window.")
         )

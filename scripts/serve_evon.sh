@@ -1,41 +1,35 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# RoboSahaya — Gnani AI Evon v3.3 (30B MoE) Model Serving Script
+# Optional local OpenAI-compatible reasoning endpoint.
 # ==============================================================================
-# Model Architecture: NemotronHForCausalLM (Mamba2 + Transformer MoE)
-# Shards: 13 Safetensor shards (~59.1 GB BF16)
-# Vocab: 163,072 (Native Indic + Telugu support)
-# Context Window: 131,072 tokens
-#
-# Hardware Requirements:
-# - Full BF16: Requires ~60GB+ VRAM (e.g., 1x A100 80GB, 1x H100, or 2x RTX 3090/4090 with TP=2).
-# - 4-bit / 8-bit Quantized: Requires ~18-32GB VRAM.
-#
-# For local laptop evaluation on RTX 5050 (8GB VRAM), RoboSahaya automatically
-# runs with the verified local tokenizer and high-fidelity Evon reasoning adapter.
+# Point EVON_API_URL in the RoboSahaya environment at this endpoint and configure
+# the same EVON_API_KEY. This script does not download or identify model weights.
 # ==============================================================================
 
 set -euo pipefail
 
-MODEL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../models" && pwd)"
+MODEL_DIR="${EVON_MODEL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../models" && pwd)}"
 PORT="${PORT:-8000}"
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
+if [ -z "${EVON_API_KEY:-}" ]; then
+    echo "Set EVON_API_KEY before starting the local endpoint."
+    exit 1
+fi
 
 echo "=================================================================="
-echo "🤖 Starting Gnani AI Evon v3.3 30B MoE Model Server"
+echo "Starting configured local reasoning model server"
 echo "📂 Model Weights Path: ${MODEL_DIR}"
 echo "🌐 Endpoint: http://${HOST}:${PORT}/v1/chat/completions"
 echo "=================================================================="
 
 # Check if model files exist
-if [ ! -f "${MODEL_DIR}/config.json" ] || [ ! -f "${MODEL_DIR}/model.safetensors.index.json" ]; then
-    echo "❌ Error: Model weights not found in ${MODEL_DIR}!"
+if [ ! -f "${MODEL_DIR}/config.json" ] || ! compgen -G "${MODEL_DIR}/*.safetensors" >/dev/null; then
+    echo "Model config or safetensors weights were not found in ${MODEL_DIR}."
     exit 1
 fi
 
-SHARD_COUNT=$(ls -1 "${MODEL_DIR}"/model-*.safetensors 2>/dev/null | wc -l)
-echo "✅ Verified ${SHARD_COUNT}/13 Safetensor shards present."
+echo "Found model config and safetensors files in ${MODEL_DIR}."
 
 # Check if vLLM is installed
 if command -v vllm &>/dev/null; then
@@ -43,22 +37,13 @@ if command -v vllm &>/dev/null; then
     exec vllm serve "${MODEL_DIR}" \
         --host "${HOST}" \
         --port "${PORT}" \
+        --api-key "${EVON_API_KEY}" \
         --tensor-parallel-size "${TENSOR_PARALLEL}" \
-        --trust-remote-code \
-        --max-model-len 8192 \
-        --served-model-name "evon-v3.3"
-elif command -v sglang &>/dev/null; then
-    echo "🚀 Launching via SGLang Server..."
-    exec python -m sglang.launch_server \
-        --model-path "${MODEL_DIR}" \
-        --host "${HOST}" \
-        --port "${PORT}" \
-        --trust-remote-code
+        --max-model-len "${EVON_MAX_MODEL_LEN:-8192}" \
+        --served-model-name "${EVON_MODEL_ID:-local-reasoning-model}"
 else
-    echo "ℹ️ Neither vllm nor sglang detected in PATH."
-    echo "To serve the 30B model with GPU acceleration:"
+    echo "vLLM was not found in PATH. Install a compatible vLLM build to serve this model:"
     echo "  pip install vllm"
     echo "  bash scripts/serve_evon.sh"
-    echo ""
-    echo "Meanwhile, RoboSahaya is fully operational with local tokenizer verification & simulated Evon reasoning."
+    exit 1
 fi

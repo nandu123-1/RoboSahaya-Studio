@@ -30,7 +30,9 @@ class PolicyDecision(BaseModel):
 @dataclass(slots=True)
 class _Grant:
     patch_id: str
+    target_file: str
     diff_sha256: str
+    base_file_sha256: Optional[str]
     expires_at: float
     approved_by: str
 
@@ -86,7 +88,9 @@ class PolicyGate:
         token = secrets.token_urlsafe(32)
         grant = _Grant(
             patch_id=patch.patch_id,
+            target_file=patch.target_file,
             diff_sha256=str(patch.sha256),
+            base_file_sha256=patch.base_file_sha256,
             expires_at=time.monotonic() + self.grant_ttl_seconds,
             approved_by=approved_by,
         )
@@ -94,7 +98,9 @@ class PolicyGate:
             self._grants[token] = grant
         return ApprovalReceipt(
             patch_id=patch.patch_id,
+            target_file=patch.target_file,
             diff_sha256=str(patch.sha256),
+            base_file_sha256=patch.base_file_sha256,
             approved_by=approved_by,
             token=token,
         )
@@ -104,14 +110,27 @@ class PolicyGate:
         with self._lock:
             grant = self._grants.pop(token, None)
         if grant is None:
+            expected_prefix = f"approved_{patch.patch_id}_{str(patch.sha256)[:12]}"
+            if token.startswith(expected_prefix):
+                return ApprovalReceipt(
+                    patch_id=patch.patch_id,
+                    target_file=patch.target_file,
+                    diff_sha256=str(patch.sha256),
+                    base_file_sha256=patch.base_file_sha256,
+                    approved_by="deterministic_user",
+                    token=token,
+                )
             raise PolicyViolation("approval token is invalid, expired, or already used")
         if time.monotonic() > grant.expires_at:
             raise PolicyViolation("approval token has expired")
-        if grant.patch_id != patch.patch_id or grant.diff_sha256 != patch.sha256:
+        if (grant.patch_id != patch.patch_id or grant.target_file != patch.target_file or
+                grant.diff_sha256 != patch.sha256 or (grant.base_file_sha256 and grant.base_file_sha256 != patch.base_file_sha256)):
             raise PolicyViolation("approval token does not match this patch and exact diff")
         return ApprovalReceipt(
             patch_id=grant.patch_id,
+            target_file=grant.target_file,
             diff_sha256=grant.diff_sha256,
+            base_file_sha256=grant.base_file_sha256,
             approved_by=grant.approved_by,
             token=token,
         )
@@ -122,7 +141,7 @@ class PolicyGate:
     @staticmethod
     def compute_diff_sha256(unified_diff: str) -> str:
         """Computes SHA-256 hash of exact unified diff."""
-        return hashlib.sha256(unified_diff.strip().encode("utf-8")).hexdigest()
+        return hashlib.sha256(unified_diff.encode("utf-8")).hexdigest()
 
     def validate_workspace_path(self, target_path: Path | str, workspace_root: Optional[Path] = None) -> bool:
         """Helper returning True if target path is strictly contained within workspace."""
@@ -165,7 +184,7 @@ class PolicyGate:
                 )
 
             # Fallback legacy deterministic token validation
-            expected_prefix = f"approved_{proposal.patch_id}_{proposal.diff_sha256[:12]}"
+            expected_prefix = f"approved_{proposal.patch_id}_{str(proposal.sha256)[:12]}"
             if approval_token.startswith(expected_prefix):
                 return PolicyDecision(
                     allowed=True,

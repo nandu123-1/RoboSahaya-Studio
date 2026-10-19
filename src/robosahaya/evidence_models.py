@@ -122,7 +122,14 @@ class MessageSampleEvidence(BaseModel):
     topic: str
     messages_received: int = 0
     sample_window_sec: float = 1.0
+    frequency_hz: float = 0.0
     latest_message_snippet: Optional[str] = None
+    valid_samples: int = 0
+    invalid_samples: int = 0
+    payload_valid: Optional[bool] = None
+    clock_advancing: Optional[bool] = None
+    validation_detail: Optional[str] = None
+    sampling_error: Optional[str] = None
 
 
 class GraphSnapshot(BaseModel):
@@ -132,6 +139,7 @@ class GraphSnapshot(BaseModel):
     parameters: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     tf_frames: List[str] = Field(default_factory=list)
     clock_active: bool = False
+    clock_advancing: Optional[bool] = None
 
 
 class EvidenceRecord(StrictModel):
@@ -142,6 +150,7 @@ class EvidenceRecord(StrictModel):
     result: dict[str, Any] = Field(default_factory=dict)
     status: EvidenceStatus
     limitations: str = Field(default="", max_length=1000)
+    source_mode: Literal["live", "replay", "user_provided"] = "live"
 
 
 class Hypothesis(StrictModel):
@@ -171,6 +180,9 @@ class CommandItem(StrictModel):
 
 
 class PatchProposal(StrictModel):
+    # Unified diff whitespace and its final newline are digest-bound file content.
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, str_strip_whitespace=False)
+
     patch_id: str = Field(pattern=r"^[A-Za-z0-9_-]{4,80}$")
     target_file: str = Field(min_length=1, max_length=300)
     unified_diff: str = Field(min_length=1, max_length=100_000)
@@ -178,6 +190,7 @@ class PatchProposal(StrictModel):
     verification_test_id: str = Field(pattern=r"^[a-z][a-z0-9_]{1,79}$")
     requires_approval: Literal[True] = True
     sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    base_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     backup_required: bool = True
 
     @property
@@ -230,6 +243,8 @@ class DiagnosisResponse(StrictModel):
     proposed_patch: PatchProposal | None = None
     next_question: str | None = Field(default=None, max_length=500)
     limitations: list[str] = Field(default_factory=list, max_length=30)
+    evidence_records: list[EvidenceRecord] = Field(default_factory=list, max_length=100)
+    reasoning_source: Literal["rules", "evon", "replay"] = "rules"
 
     @field_validator("observations")
     @classmethod
@@ -274,7 +289,9 @@ class ToolResult(StrictModel):
 
 class ApprovalReceipt(StrictModel):
     patch_id: str
+    target_file: str = Field(min_length=1, max_length=300)
     diff_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    base_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     approved_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     approved_by: str = Field(min_length=1, max_length=128)
     token: str = Field(min_length=20, max_length=256)
@@ -287,6 +304,8 @@ class TestResult(StrictModel):
     measured_values: Dict[str, Any] = Field(default_factory=dict)
     expected_criteria: Dict[str, Any] = Field(default_factory=dict)
     log_excerpt: str = ""
+    source_mode: Literal["live", "replay"] = "replay"
+    status: Literal["passed", "failed", "blocked", "not_run"] = "not_run"
 
 
 class SensorPayloadValidation(StrictModel):
@@ -298,3 +317,53 @@ class SensorPayloadValidation(StrictModel):
     is_valid: bool
     frequency_hz: float
     error_reason: Optional[str] = None
+
+
+def compute_plan_digest(
+    user_goal: str,
+    robot_template: str,
+    world_template: str,
+    requested_capabilities: List[str],
+    verification_tests: List[str],
+    tools_to_run: List[str],
+    simulator_adapter: str = "",
+    model_format: str = ""
+) -> str:
+    payload = f"{user_goal.strip()}|{robot_template.strip()}|{world_template.strip()}|{sorted(requested_capabilities)}|{sorted(verification_tests)}|{sorted(tools_to_run)}|{simulator_adapter.strip()}|{model_format.strip()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class TaskPlan(StrictModel):
+    task_id: str
+    user_goal: str
+    robot_template: str
+    world_template: str
+    requested_capabilities: List[str] = Field(default_factory=list)
+    unsupported_capabilities: List[str] = Field(default_factory=list)
+    is_supported: bool = True
+    rejection_reason: Optional[str] = None
+    ordered_stages: List[TaskStage] = Field(default_factory=list)
+    tools_to_run: List[str] = Field(default_factory=list)
+    permission_tiers: Dict[str, PermissionTier] = Field(default_factory=dict)
+    verification_tests: List[str] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+    estimated_side_effects: List[str] = Field(default_factory=list)
+    plan_digest: str = Field(default="", pattern=r"^([a-f0-9]{64})?$")
+    robot_selection_reason: str = ""
+    world_selection_reason: str = ""
+    selection_source: str = "rule_based"
+    is_auto_selected: bool = True
+    is_manual_override: bool = False
+    manual_overrides: Dict[str, str] = Field(default_factory=dict)
+    sensors_selected: List[str] = Field(default_factory=list)
+    ros_topics: List[str] = Field(default_factory=list)
+    expected_behavior: str = ""
+    measurable_criteria: Dict[str, Any] = Field(default_factory=dict)
+    mcp_verified: bool = False
+    mcp_verified_facts: List[str] = Field(default_factory=list)
+    is_stale: bool = False
+    simulator_adapter: str = "gazebo_harmonic"
+    model_format: str = "URDF"
+    milestones: Dict[str, Any] = Field(default_factory=dict)
+
+

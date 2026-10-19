@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 from robosahaya.config import settings
 from robosahaya.ui import create_ui
 
@@ -10,9 +11,15 @@ def main():
                         help="Default snapshot scenario for mock mode")
     parser.add_argument("--host", type=str, default=settings.HOST, help="Host address to bind")
     parser.add_argument("--port", type=int, default=settings.PORT, help="Port to bind")
-    parser.add_argument("--share", action="store_true", help="Create public Gradio share link")
 
     args = parser.parse_args()
+
+    if args.host != "localhost":
+        try:
+            if not ipaddress.ip_address(args.host).is_loopback:
+                parser.error("The unauthenticated local UI can bind only to a loopback address.")
+        except ValueError:
+            parser.error("--host must be localhost or a loopback IP address.")
 
     settings.ROBOSAHAYA_MODE = args.mode
     settings.ROBOSAHAYA_MOCK_SCENARIO = args.scenario
@@ -24,7 +31,7 @@ def main():
     print("=" * 65)
 
     demo = create_ui()
-    demo.launch(server_name=args.host, server_port=args.port, share=args.share)
+    demo.launch(server_name=args.host, server_port=args.port, share=False)
 
 
 if __name__ == "__main__":
