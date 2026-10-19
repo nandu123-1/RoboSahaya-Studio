@@ -7,9 +7,18 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from pathlib import Path
+from dotenv import load_dotenv
+
 from .base import BaseCatalogueProvider, BaseStorageProvider
 from .offline_provider import OfflineCatalogueProvider, OfflineStorageProvider
 from .supabase_provider import SupabaseCatalogueProvider, SupabaseStorageProvider
+
+# Guarantee .env is loaded in any runtime context
+_ROOT_ENV = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+if _ROOT_ENV.exists():
+    load_dotenv(_ROOT_ENV)
+
 
 _cached_catalogue: Optional[BaseCatalogueProvider] = None
 _cached_storage: Optional[BaseStorageProvider] = None

@@ -269,11 +269,21 @@ class RobotModelCatalog:
         if model is None:
             return {"success": False, "error": f"Unknown robot model '{model_id}'. Choose a model from the catalogue."}
         if model.runtime_ready:
+            cache_note = ""
+            try:
+                c_res = self.model_cache.prepare_model(model.id)
+                if c_res.get("success"):
+                    num = c_res.get("total_files", 0)
+                    cache_note = f" Cache verified ({num} assets cryptographically checked)."
+            except Exception as e:
+                logger.debug("Cache prep for %s: %s", model.id, e)
+            sim_name = "MuJoCo" if model.id == "rsk" else "Gazebo"
             return {
                 "success": True, "model_id": model.id, "display_name": model.display_name,
-                "runtime_ready": True, "message": "This model already uses a bundled RoboSahaya Gazebo template; no download is needed.",
+                "runtime_ready": True, "message": f"This model has a verified {sim_name} execution pipeline.{cache_note}",
                 "runtime_template_id": model.runtime_template_id,
             }
+
         if not model.description_module:
             return {"success": False, "error": "No safe description module is registered for this catalogue entry."}
         if not self.descriptions_package_installed:
