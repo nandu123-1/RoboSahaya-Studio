@@ -264,29 +264,37 @@ class SupabaseStorageProvider(BaseStorageProvider):
             logger.warning("Failed to sign download URL for '%s': %s", object_key, str(e))
         return None
 
-    def download_package(self, object_key: str, destination: Path) -> bool:
+    def download_package(self, object_key: str, destination: Path, max_retries: int = 3) -> bool:
         if not self._storage_url or not self.service_key or not object_key:
             return False
-        try:
-            clean_key = object_key.lstrip("/")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temp_dest = destination.with_suffix(f"{destination.suffix}.part")
+        clean_key = object_key.lstrip("/")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_dest = destination.with_suffix(f"{destination.suffix}.part")
 
-            with httpx.Client(timeout=self.timeout) as client:
-                with client.stream("GET", f"{self._storage_url}/object/authenticated/{self.bucket}/{clean_key}", headers=self._headers()) as res:
-                    if res.status_code != 200:
-                        logger.warning("Supabase storage download failed with status %d", res.status_code)
-                        return False
-                    with open(temp_dest, "wb") as f:
-                        for chunk in res.iter_bytes(chunk_size=65536):
-                            f.write(chunk)
-            temp_dest.replace(destination)
-            return True
-        except Exception as e:
-            logger.warning("Error downloading package '%s': %s", object_key, str(e))
-            if temp_dest.exists():
-                temp_dest.unlink(missing_ok=True)
-            return False
+        import time
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    with client.stream("GET", f"{self._storage_url}/object/authenticated/{self.bucket}/{clean_key}", headers=self._headers()) as res:
+                        if res.status_code == 200:
+                            with open(temp_dest, "wb") as f:
+                                for chunk in res.iter_bytes(chunk_size=65536):
+                                    f.write(chunk)
+                            temp_dest.replace(destination)
+                            return True
+                        elif res.status_code == 404:
+                            logger.warning("Supabase storage object not found (404): %s", clean_key)
+                            return False
+                        else:
+                            logger.warning("Supabase download returned status %d on attempt %d", res.status_code, attempt + 1)
+            except Exception as e:
+                logger.warning("Error downloading package '%s' (attempt %d/%d): %s", object_key, attempt + 1, max_retries, str(e))
+                time.sleep(0.5 * (attempt + 1))
+            finally:
+                if temp_dest.exists() and not destination.exists():
+                    temp_dest.unlink(missing_ok=True)
+
+        return False
 
     def upload_package(self, object_key: str, file_path: Path, metadata: Optional[Dict[str, str]] = None) -> bool:
         if not self._storage_url or not self.service_key or not file_path.exists():
