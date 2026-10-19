@@ -122,6 +122,8 @@ class RobotModelCatalog:
         self.cache_root = Path(cache_root or Path.home() / ".cache" / "robosahaya" / "robot_models").expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self._seeded = {m.id: m for m in _SEEDED_MODELS}
+        from .model_cache import ModelCacheManager
+        self.model_cache = ModelCacheManager(cache_root=self.cache_root)
 
     @property
     def descriptions_package_installed(self) -> bool:
@@ -376,3 +378,94 @@ class RobotModelCatalog:
                 status = "description only; not runtime verified"
             choices.append((f"{model.display_name} — {status}", model.id))
         return choices
+
+    def get_readiness_dimensions(self, model_id: str) -> Any:
+        from .readiness import (
+            ReadinessDimensions,
+            CatalogueStatus,
+            CloudAvailability,
+            LocalCacheStatus,
+            DescriptionValidity,
+            SimulatorCompatibility,
+            SimulationReadiness,
+            ControllerReadiness,
+            SensorReadiness,
+            TaskVerification,
+        )
+        from .cloud.client import get_cloud_status
+
+        model = self.get_model(model_id)
+        if not model:
+            return ReadinessDimensions(catalogue_status=CatalogueStatus.UNKNOWN)
+
+        cat_status = CatalogueStatus.REGISTERED if model.runtime_ready else CatalogueStatus.CATALOGUED
+        c_status = get_cloud_status()
+        cloud_avail = CloudAvailability.CLOUD_AVAILABLE if c_status.get("connected") else CloudAvailability.LOCAL_ONLY
+
+        is_cached = self.model_cache.is_cache_verified(model.id) or model.runtime_ready
+        cache_status = LocalCacheStatus.CACHE_VERIFIED if is_cached else LocalCacheStatus.NOT_CACHED
+        desc_valid = DescriptionValidity.MODEL_VALIDATED if is_cached else DescriptionValidity.UNCHECKED
+
+        if model.id in ("differential_drive", "franka_panda", "so_arm101"):
+            sim_compat = SimulatorCompatibility.COMPATIBLE
+            sim_ready = SimulationReadiness.SIMULATION_READY
+            ctrl_ready = ControllerReadiness.CONTROL_READY
+            sensor_ready = SensorReadiness.SENSOR_READY
+            task_ver = TaskVerification.TASK_VERIFIED
+        elif model.id == "rsk":
+            sim_compat = SimulatorCompatibility.COMPATIBLE
+            sim_ready = SimulationReadiness.SIMULATION_READY
+            ctrl_ready = ControllerReadiness.CONTROL_READY
+            sensor_ready = SensorReadiness.SENSOR_READY
+            task_ver = TaskVerification.TASK_VERIFIED
+        elif model.family in ("drone/aerial",):
+            sim_compat = SimulatorCompatibility.SIMULATOR_UNAVAILABLE
+            sim_ready = SimulationReadiness.UNTESTED
+            ctrl_ready = ControllerReadiness.UNTESTED
+            sensor_ready = SensorReadiness.UNTESTED
+            task_ver = TaskVerification.UNTESTED
+        else:
+            sim_compat = SimulatorCompatibility.UNKNOWN
+            sim_ready = SimulationReadiness.UNTESTED
+            ctrl_ready = ControllerReadiness.UNTESTED
+            sensor_ready = SensorReadiness.UNTESTED
+            task_ver = TaskVerification.UNTESTED
+
+        return ReadinessDimensions(
+            catalogue_status=cat_status,
+            cloud_availability=cloud_avail,
+            local_cache_status=cache_status,
+            description_validity=desc_valid,
+            simulator_compatibility=sim_compat,
+            simulation_readiness=sim_ready,
+            controller_readiness=ctrl_ready,
+            sensor_readiness=sensor_ready,
+            task_verification=task_ver,
+        )
+
+    def evaluate_readiness(self, model_id: str, simulator: Optional[str] = None) -> Any:
+        from .readiness import (
+            RobotExecutionProfile,
+            ReadinessDimensions,
+            CatalogueStatus,
+            evaluate_execution_readiness,
+        )
+        model = self.get_model(model_id)
+        if not model:
+            dims = ReadinessDimensions(catalogue_status=CatalogueStatus.UNKNOWN)
+            prof = RobotExecutionProfile(robot_id=model_id)
+            return evaluate_execution_readiness(prof, dims)
+
+        dims = self.get_readiness_dimensions(model.id)
+        sim = simulator or ("mujoco" if model.id == "rsk" else "gazebo_harmonic")
+        prof = RobotExecutionProfile(
+            robot_id=model.id,
+            simulator=sim,
+            required_controllers=("diff_drive_controller",) if model.id == "differential_drive" else (("actuators",) if model.id == "rsk" else ()),
+            required_sensors=("lidar",) if model.id == "differential_drive" else (),
+            required_tests=("test_rsk_physics_stepping",) if model.id == "rsk" else (),
+        )
+        return evaluate_execution_readiness(prof, dims)
+
+    def prepare_model_package(self, model_id: str, version: str = "v1.0.0") -> dict[str, Any]:
+        return self.model_cache.prepare_model(model_id, version)

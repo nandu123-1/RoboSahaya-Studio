@@ -293,18 +293,27 @@ class MujocoAdapter(SimulatorAdapter):
             },
         }
 
-    def launch_gui(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    def launch_gui(self, context: Any) -> Dict[str, Any]:
         """Launch the official MuJoCo interactive viewer."""
         env = os.environ.copy()
         if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
             return {"success": False, "error": "No graphical DISPLAY or WAYLAND_DISPLAY detected."}
 
-        model_path = Path(context["model_path"])
+        if isinstance(context, (str, Path)):
+            model_path = Path(context)
+            task_id = "default_task"
+        elif isinstance(context, dict):
+            model_path = Path(context.get("model_path", ""))
+            task_id = context.get("task_id", "default_task")
+        else:
+            return {"success": False, "error": f"Invalid context type: {type(context)}"}
+
+        if not model_path.exists():
+            return {"success": False, "error": f"Model path '{model_path}' does not exist on disk."}
+
         # If scene.xml exists in the same folder, prefer scene.xml as it includes lighting, floor, and skybox
         scene_path = model_path.parent / "scene.xml"
         view_target = scene_path if scene_path.exists() else model_path
-
-        task_id = context.get("task_id", "default_task")
 
         try:
             proc = subprocess.Popen(

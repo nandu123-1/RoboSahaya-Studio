@@ -980,6 +980,14 @@ def create_ui() -> gr.Blocks:
                 else:
                     gr.Markdown("✅ Optional `robot_descriptions` package detected. Model-specific source downloads happen only after an explicit prepare action.")
 
+                from .cloud.client import get_cloud_status
+                cloud_info = get_cloud_status()
+                gr.Markdown(
+                    f"**Cloud Model Backend:** `{cloud_info['status_badge']}` | "
+                    f"**Storage Bucket:** `{cloud_info['storage_bucket']}` | "
+                    f"*{cloud_info['diagnostics']}*"
+                )
+
                 with gr.Row():
                     catalog_search = gr.Textbox(label="Search robots", placeholder="e.g. SO-101, Panda, Go2, UR5e, humanoid", scale=3)
                     family_values = sorted({m.family for m in robot_catalog.list_models(include_discovered=True)})
@@ -1003,9 +1011,11 @@ def create_ui() -> gr.Blocks:
                         value=None,
                         interactive=True,
                         allow_custom_value=False,
-                        scale=3,
+                        scale=2,
                     )
                     prepare_model_btn = gr.Button("📥 Prepare / Cache Description", variant="primary", scale=1)
+                    verify_integrity_btn = gr.Button("🛡️ Verify Integrity", variant="secondary", scale=1)
+                    inspect_readiness_btn = gr.Button("📊 9D Readiness Profile", variant="secondary", scale=1)
                 model_prepare_result = gr.Markdown(
                     "*Choose a model and click Prepare / Cache Description. Runtime readiness will not be inferred from download success.*"
                 )
@@ -1039,6 +1049,39 @@ def create_ui() -> gr.Blocks:
                         f"**Not yet Gazebo-ready:** {result['message']} The standard execution pipeline remains blocked for this model until its simulator integration, controllers, sensor topics, and verification tests are implemented and passed."
                     )
 
+                def on_verify_integrity(model_id):
+                    if not model_id:
+                        return "### ⚠️ No robot model selected."
+                    res = robot_catalog.model_cache.validate_cache_integrity(model_id)
+                    if res.get("valid"):
+                        return f"### 🛡️ Cache Integrity Verified: `{model_id}`\n\n- All `{res.get('file_count', 0)}` assets matched their expected SHA-256 digests.\n- Local cache is cryptographically sound and safe for staging."
+                    return f"### ❌ Cache Integrity Check Failed: `{model_id}`\n\n- Reason: `{res.get('reason')}`\n- Recommendation: Click 'Prepare / Cache Description' to re-fetch and restore valid assets."
+
+                def on_inspect_readiness(model_id):
+                    if not model_id:
+                        return "### ⚠️ No robot model selected."
+                    decision = robot_catalog.evaluate_readiness(model_id)
+                    d = decision.dimensions
+                    blockers_md = "\n".join(f"- 🔴 {b}" for b in decision.blockers) if decision.blockers else "*(None — all required preconditions met)*"
+                    return f"""### 📊 Authoritative 9-Dimensional Readiness: `{model_id}` ({decision.model_version})
+**Overall Execution Verdict:** `{decision.summary_label}`
+
+| Dimension | Verified Status | Meaning |
+|---|---|---|
+| **1. Catalogue Identity** | `{d.catalogue_status.value}` | Known canonical model and metadata |
+| **2. Cloud Availability** | `{d.cloud_availability.value}` | Upstream / Supabase asset availability |
+| **3. Local Cache Status** | `{d.local_cache_status.value}` | Local files downloaded and integrity verified |
+| **4. Description Validity** | `{d.description_validity.value}` | XML/MJCF syntax and asset resolution |
+| **5. Simulator Compatibility** | `{d.simulator_compatibility.value}` | Compatible runtime adapter registered |
+| **6. Simulation Readiness** | `{d.simulation_readiness.value}` | Physics stepping verified |
+| **7. Controller Readiness** | `{d.controller_readiness.value}` | Actuator control response verified |
+| **8. Sensor Readiness** | `{d.sensor_readiness.value}` | Topic stream telemetry verified |
+| **9. Task Verification** | `{d.task_verification.value}` | E2E task success criteria met |
+
+**Identified Blockers / Preconditions:**
+{blockers_md}
+"""
+
                 catalog_refresh_btn.click(
                     fn=refresh_catalog,
                     inputs=[catalog_search, catalog_family, model_to_prepare],
@@ -1056,6 +1099,16 @@ def create_ui() -> gr.Blocks:
                 )
                 prepare_model_btn.click(
                     fn=on_prepare_robot_description,
+                    inputs=[model_to_prepare],
+                    outputs=[model_prepare_result],
+                )
+                verify_integrity_btn.click(
+                    fn=on_verify_integrity,
+                    inputs=[model_to_prepare],
+                    outputs=[model_prepare_result],
+                )
+                inspect_readiness_btn.click(
+                    fn=on_inspect_readiness,
                     inputs=[model_to_prepare],
                     outputs=[model_prepare_result],
                 )

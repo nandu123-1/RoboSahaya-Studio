@@ -1,0 +1,132 @@
+"""Abstract interfaces for Cloud Robot Catalogue and Storage Providers.
+
+Decouples core RoboSahaya Studio logic from any specific cloud vendor (Supabase, AWS S3, local filesystem).
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+@dataclass
+class CloudModelRecord:
+    id: str
+    display_name: str
+    family: str
+    description: str
+    manufacturer: str = "Unknown"
+    aliases: List[str] = field(default_factory=list)
+    default_version: str = "v1.0.0"
+    catalogue_status: str = "catalogued"
+    licence: str = "Check upstream source"
+    licence_url: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CloudVersionRecord:
+    id: str
+    robot_model_id: str
+    version: str
+    source_type: str
+    source_repository: str
+    source_revision: str
+    description_format: str
+    entrypoint_path: str
+    manifest_path: str
+    content_fingerprint: str
+    validation_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CloudAssetRecord:
+    id: str
+    version_id: str
+    relative_path: str
+    asset_type: str
+    object_storage_key: str
+    upstream_reference: str
+    sha256: str
+    size_bytes: int
+    required: bool = True
+
+
+@dataclass
+class VerificationRunRecord:
+    id: str
+    robot_model_version_id: str
+    adapter_id: str
+    world_id: str
+    test_suite_version: str
+    environment_fingerprint: str
+    overall_result: str
+    check_results: List[Dict[str, Any]]
+    report_fingerprint: str
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    completed_at: Optional[str] = None
+
+
+class BaseCatalogueProvider(ABC):
+    """Abstract interface for querying and persisting robot metadata."""
+
+    @abstractmethod
+    def is_connected(self) -> bool:
+        """Return True if the remote database is accessible."""
+        ...
+
+    @abstractmethod
+    def list_models(self, family: str = "All", search: str = "") -> List[CloudModelRecord]:
+        """List available models with optional search and family filter."""
+        ...
+
+    @abstractmethod
+    def get_model(self, model_id: str) -> Optional[CloudModelRecord]:
+        """Get model metadata by canonical ID or alias."""
+        ...
+
+    @abstractmethod
+    def get_version(self, model_id: str, version: str = "latest") -> Optional[CloudVersionRecord]:
+        """Get a specific version record for a robot model."""
+        ...
+
+    @abstractmethod
+    def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
+        """List all asset records belonging to a model version."""
+        ...
+
+    @abstractmethod
+    def record_verification_run(self, run: VerificationRunRecord) -> bool:
+        """Persist a verified execution or simulation run record."""
+        ...
+
+
+class BaseStorageProvider(ABC):
+    """Abstract interface for downloading and uploading robot packages and assets."""
+
+    @abstractmethod
+    def is_connected(self) -> bool:
+        """Return True if object storage is configured and reachable."""
+        ...
+
+    @abstractmethod
+    def check_object(self, object_key: str) -> Dict[str, Any]:
+        """Check if an object exists and retrieve its metadata (exists, size, sha256)."""
+        ...
+
+    @abstractmethod
+    def resolve_download_url(self, object_key: str, expires_in: int = 3600) -> Optional[str]:
+        """Get a short-lived signed URL or direct URI for downloading an object."""
+        ...
+
+    @abstractmethod
+    def download_package(self, object_key: str, destination: Path) -> bool:
+        """Download a model package archive or asset to destination."""
+        ...
+
+    @abstractmethod
+    def upload_package(self, object_key: str, file_path: Path, metadata: Optional[Dict[str, str]] = None) -> bool:
+        """Upload a model package archive to object storage (when permitted)."""
+        ...
