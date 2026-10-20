@@ -64,31 +64,31 @@ class WorldScene:
         if any(w in q for w in ("in front of the arm", "in front of arm", "in front", "front object")):
             # Red cube is positioned directly in front of the arm in tabletop_world
             for ent in self._entities.values():
-                if ent.entity_type == "cube" and not ent.is_static:
+                if not ent.is_static and ent.entity_type in ("cube", "ball", "object", "block"):
                     return ent
 
-        # Color matches
+        # Color matches (only dynamic manipulable objects)
         if "red" in q:
             for ent in self._entities.values():
-                if ent.color == "red" or "red" in ent.id or "red" in ent.name.lower():
+                if not ent.is_static and (ent.color == "red" or "red" in ent.id or "red" in ent.name.lower()):
                     return ent
         if "blue" in q:
             for ent in self._entities.values():
-                if ent.color == "blue" or "blue" in ent.id or "blue" in ent.name.lower():
+                if not ent.is_static and (ent.color == "blue" or "blue" in ent.id or "blue" in ent.name.lower()):
                     return ent
         if "green" in q:
             for ent in self._entities.values():
-                if ent.color == "green" or "green" in ent.id or "green" in ent.name.lower():
+                if not ent.is_static and (ent.color == "green" or "green" in ent.id or "green" in ent.name.lower()):
                     return ent
 
-        # Type matches
+        # Type matches (strictly dynamic non-static manipulable entities)
         for ent in self._entities.values():
-            if ent.entity_type in q or ent.name.lower() in q:
+            if not ent.is_static and (ent.entity_type in q or ent.name.lower() in q):
                 return ent
 
-        # Fallback to first non-static manipulation object
+        # Fallback to first non-static manipulation object (e.g. target_cube_red)
         for ent in self._entities.values():
-            if not ent.is_static and ent.entity_type in ("cube", "ball"):
+            if not ent.is_static and ent.entity_type in ("cube", "ball", "box", "object", "block"):
                 return ent
 
         return None

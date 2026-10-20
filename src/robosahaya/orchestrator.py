@@ -676,7 +676,17 @@ class TaskOrchestrator:
         gui_info = {}
         if not headless:
             emit(TaskStage.LAUNCHING, "Launching interactive MuJoCo 3D viewer on desktop...", speak=True, tool="launch_mujoco_viewer")
-            gui_info = adapter.launch_gui({"model_path": str(model_path), "task_id": task_id})
+            cmd_vel = 5.44
+            if plan and getattr(plan, "task_spec", None) and plan.task_spec.get("action_sequence"):
+                for step in plan.task_spec.get("action_sequence", []):
+                    params = step.get("parameters", {})
+                    if "velocity" in params:
+                        try:
+                            cmd_vel = float(params["velocity"])
+                            break
+                        except (ValueError, TypeError):
+                            pass
+            gui_info = adapter.launch_gui({"model_path": str(model_path), "task_id": task_id, "velocity": cmd_vel})
             if gui_info.get("success"):
                 emit(TaskStage.LAUNCHING, f"MuJoCo 3D viewer opened (PID: {gui_info.get('pid')}). Check your desktop for the 3D window.", severity="info")
             else:

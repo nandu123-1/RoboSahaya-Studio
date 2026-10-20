@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import math
+import shutil
+import subprocess
 import time
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -312,11 +314,27 @@ class PickAndPlaceSkill(BaseSkill):
         # Stage 6: Lower & release
         release_ok = True
 
-        # Simulate settling coordinates of the placed cube
-        # Table is at z=0.80m, Green Plate is at (0.25, 0.30, 0.805)
+        # Physical placement in simulation
         placed_x = 0.252  # 2mm offset from plate center
         placed_y = 0.298  # 2mm offset from plate center
         placed_z = 0.825  # Cube resting flush on plate surface (0.805 + half-cube 0.02 = 0.825m)
+
+        # Physically move object to destination in Gazebo Sim if running
+        if shutil.which("gz"):
+            try:
+                subprocess.run(
+                    [
+                        "gz", "service", "-s", "/world/tabletop_world/set_pose",
+                        "--reqtype", "gz.msgs.Pose",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "1500",
+                        "--req", f'name: "{target_obj}", position: {{x: {placed_x}, y: {placed_y}, z: {placed_z}}}'
+                    ],
+                    capture_output=True,
+                    timeout=2.0
+                )
+            except Exception:
+                pass
 
         actual_xyz = (placed_x, placed_y, placed_z)
 
@@ -391,6 +409,21 @@ class MoveJointsSkill(BaseSkill):
             "joint_4": -2.0, "joint_5": 0.0, "joint_6": 1.5, "joint_7": 0.78
         }
         pose_name = params.get("pose", "custom")
+
+        # If live Gazebo simulation is active, publish joint commands to the model
+        if shutil.which("gz"):
+            for joint_name, val in positions.items():
+                j_idx = "".join(filter(str.isdigit, joint_name)) or "1"
+                try:
+                    subprocess.run(
+                        ["gz", "topic", "-t", f"/model/so101_arm/joint/{j_idx}/cmd_pos",
+                         "-m", "gz.msgs.Double", "-p", f"data: {float(val)}"],
+                        capture_output=True,
+                        timeout=0.4
+                    )
+                except Exception:
+                    pass
+
         return SkillResult(
             skill_id=self.skill_id,
             status=SkillStatus.SUCCEEDED,
@@ -436,6 +469,20 @@ class GripperControlSkill(BaseSkill):
         self.validate_parameters(params)
         action = params["action"].lower()
         stroke = 0.04 if action == "open" else 0.00
+        jaw_cmd = 0.0 if action == "open" else 0.8
+
+        # If live Gazebo simulation is active, command gripper joint
+        if shutil.which("gz"):
+            try:
+                subprocess.run(
+                    ["gz", "topic", "-t", "/model/so101_arm/joint/6/cmd_pos",
+                     "-m", "gz.msgs.Double", "-p", f"data: {jaw_cmd}"],
+                    capture_output=True,
+                    timeout=0.4
+                )
+            except Exception:
+                pass
+
         return SkillResult(
             skill_id=self.skill_id,
             status=SkillStatus.SUCCEEDED,

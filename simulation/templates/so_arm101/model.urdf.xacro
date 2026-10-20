@@ -520,5 +520,49 @@
       <joint_name>5</joint_name>
       <joint_name>6</joint_name>
     </plugin>
+
+    <!-- Gazebo Joint Position Controllers for arm motion -->
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>1</joint_name>
+      <topic>/model/so101_arm/joint/1/cmd_pos</topic>
+      <p_gain>100</p_gain>
+      <i_gain>0.1</i_gain>
+      <d_gain>1.0</d_gain>
+    </plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>2</joint_name>
+      <topic>/model/so101_arm/joint/2/cmd_pos</topic>
+      <p_gain>100</p_gain>
+      <i_gain>0.1</i_gain>
+      <d_gain>1.0</d_gain>
+    </plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>3</joint_name>
+      <topic>/model/so101_arm/joint/3/cmd_pos</topic>
+      <p_gain>100</p_gain>
+      <i_gain>0.1</i_gain>
+      <d_gain>1.0</d_gain>
+    </plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>4</joint_name>
+      <topic>/model/so101_arm/joint/4/cmd_pos</topic>
+      <p_gain>100</p_gain>
+      <i_gain>0.1</i_gain>
+      <d_gain>1.0</d_gain>
+    </plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>5</joint_name>
+      <topic>/model/so101_arm/joint/5/cmd_pos</topic>
+      <p_gain>100</p_gain>
+      <i_gain>0.1</i_gain>
+      <d_gain>1.0</d_gain>
+    </plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>6</joint_name>
+      <topic>/model/so101_arm/joint/6/cmd_pos</topic>
+      <p_gain>50</p_gain>
+      <i_gain>0.1</i_gain>
+      <d_gain>0.5</d_gain>
+    </plugin>
   </gazebo>
 </robot>

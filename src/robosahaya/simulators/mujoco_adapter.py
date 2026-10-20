@@ -321,9 +321,18 @@ class MujocoAdapter(SimulatorAdapter):
         scene_path = model_path.parent / "scene.xml"
         view_target = scene_path if scene_path.exists() else model_path
 
+        # Check if custom velocity command is requested
+        velocity = 5.44
+        if isinstance(context, dict) and "velocity" in context:
+            try:
+                velocity = float(context["velocity"])
+            except (ValueError, TypeError):
+                velocity = 5.44
+
+        runner_module = "robosahaya.simulators.mujoco_runner"
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-m", "mujoco.viewer", f"--mjcf={str(view_target)}"],
+                [sys.executable, "-m", runner_module, str(view_target), str(velocity)],
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -334,9 +343,21 @@ class MujocoAdapter(SimulatorAdapter):
             time.sleep(0.4)
             ret = proc.poll()
             if ret is not None:
-                _, err = proc.communicate()
-                err_msg = err.decode().strip() or f"Viewer process exited immediately with returncode {ret}"
-                return {"success": False, "error": err_msg}
+                # Fallback to standard viewer
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "mujoco.viewer", f"--mjcf={str(view_target)}"],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                time.sleep(0.4)
+                ret2 = proc.poll()
+                if ret2 is not None:
+                    _, err = proc.communicate()
+                    err_msg = err.decode().strip() or f"Viewer process exited immediately with returncode {ret2}"
+                    return {"success": False, "error": err_msg}
 
             self._active_processes[task_id] = proc
             return {"success": True, "pid": proc.pid, "target": str(view_target)}

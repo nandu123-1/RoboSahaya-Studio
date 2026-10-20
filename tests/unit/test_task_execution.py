@@ -74,6 +74,38 @@ def test_interpreter_rsk_wheel_velocity():
     assert step.parameters.get("velocity") == 5.44
 
 
+def test_user_query_rsk_move_forward_at_5_44():
+    interpreter = get_task_interpreter()
+    spec = interpreter.interpret_instruction("build rsk and it has move forward at 5.44")
+
+    assert spec.is_supported is True
+    assert spec.task_type == TaskType.MOBILE_WHEEL_CONTROL
+    assert spec.canonical_robot_id == "rsk"
+    assert spec.simulator_adapter == "mujoco"
+    assert len(spec.action_sequence) == 1
+    step = spec.action_sequence[0]
+    assert step.skill_id == "set_wheel_velocity"
+    assert step.parameters.get("velocity") == 5.44
+
+
+def test_user_query_so101_pick_and_place_on_plate():
+    interpreter = get_task_interpreter()
+    spec = interpreter.interpret_instruction(
+        "build so 101 arm and pick up a real simulated object and place it on a plate, verifying the final object position."
+    )
+
+    assert spec.is_supported is True
+    assert spec.task_type == TaskType.MANIPULATION_PICK_PLACE
+    assert spec.canonical_robot_id == "so_arm101"
+    assert spec.world_id == "tabletop_world"
+    assert spec.target_objects == ["target_cube_red"]
+    assert spec.destination == "target_bin_green"
+    assert len(spec.action_sequence) == 10
+    assert spec.placement_predicate is not None
+    assert spec.placement_predicate.target_entity_id == "target_cube_red"
+    assert spec.placement_predicate.destination_entity_id == "target_bin_green"
+
+
 def test_interpreter_mobile_navigation():
     interpreter = get_task_interpreter()
     spec = interpreter.interpret_instruction("Drive to the red box and stop 0.5 metres away.")

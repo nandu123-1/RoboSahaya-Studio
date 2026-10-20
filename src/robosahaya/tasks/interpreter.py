@@ -125,7 +125,10 @@ class TaskInterpreter:
     def _classify_task_type(self, q: str) -> TaskType:
         if any(w in q for w in ("pick and place", "pick up", "place it", "grasp", "lift", "place on")):
             return TaskType.MANIPULATION_PICK_PLACE
-        if any(w in q for w in ("wheel_speed", "wheel speed", "set wheel", "wheel1", "wheel2", "wheel3")):
+        if any(w in q for w in (
+            "wheel_speed", "wheel speed", "set wheel", "wheel1", "wheel2", "wheel3", "wheel4",
+            "move forward", "drive forward", "forward at", "move at", "drive at", "velocity at"
+        )):
             return TaskType.MOBILE_WHEEL_CONTROL
         if any(w in q for w in ("move to", "drive to", "navigate to", "stop 0.", "stop 1.")):
             return TaskType.MOBILE_NAVIGATION
