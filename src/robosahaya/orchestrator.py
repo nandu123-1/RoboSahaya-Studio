@@ -127,7 +127,7 @@ class TaskOrchestrator:
         requested_caps = []
         unsupported_caps = []
 
-        if any(w in q_lower for w in ["arm", "manipulator", "gripper", "pick and place", "pick & place", "grasp", "ur5", "panda", "franka", "robotic arm"]):
+        if any(w in q_lower for w in ["arm", "manipulator", "gripper", "pick and place", "pick & place", "pick up", "place it", "place on", "grasp", "ur5", "panda", "franka", "robotic arm"]):
             requested_caps.append("robotic_arm_manipulator")
         if any(w in q_lower for w in ["drone", "uav", "quadcopter", "aerial", "fly", "flight", "underwater", "submarine"]):
             unsupported_caps.append("aerial_drone")
@@ -390,6 +390,20 @@ class TaskOrchestrator:
             sim_adapter_name = "gazebo_harmonic"
             model_fmt = "URDF"
 
+        # Structured task interpretation and capability resolution
+        from .tasks.interpreter import get_task_interpreter
+        task_interpreter = get_task_interpreter()
+        task_spec = task_interpreter.interpret_instruction(
+            instruction=query,
+            robot_id_override=effective_robot,
+            world_id_override=effective_world,
+            task_id=task_id,
+        )
+
+        if not task_spec.is_supported and is_supported:
+            is_supported = False
+            rejection_reason = task_spec.rejection_reason
+
         # Manual robot/world choices must drive the sensor and test plan too.
         if is_supported and effective_robot == "rsk":
             infer["sensors"] = ["Omnidirectional Wheel Encoders"]
@@ -410,6 +424,13 @@ class TaskOrchestrator:
             infer["verification_tests"] = ["test_laser_scan_payload"]
             infer["measurable_criteria"] = {"min_messages": 1, "finite_ranges_required": True, "target_topic": "/scan"}
             infer["expected_behavior"] = "Load the bundled differential-drive template in the obstacle world and verify its configured sensor streams."
+
+        if is_supported and task_spec and task_spec.action_sequence:
+            infer["expected_behavior"] = f"Execute {task_spec.task_type.value.replace('_', ' ').title()}: {len(task_spec.action_sequence)} action steps with closed-loop verification."
+            if task_spec.verification_conditions:
+                for cond in task_spec.verification_conditions:
+                    if cond.name not in infer["verification_tests"]:
+                        infer["verification_tests"].append(cond.name)
 
         stages = [
             TaskStage.RECEIVED,
@@ -518,6 +539,8 @@ class TaskOrchestrator:
             is_stale=False,
             simulator_adapter=sim_adapter_name,
             model_format=model_fmt,
+            task_spec=task_spec.model_dump() if task_spec else None,
+            action_steps=[s.model_dump() for s in task_spec.action_sequence] if task_spec else [],
         )
 
     async def execute_studio_pipeline(
@@ -627,6 +650,29 @@ class TaskOrchestrator:
             log_excerpt=f"{target_model.display_name} simulated in MuJoCo: 100 stable physics steps, 4 omnidirectional wheel actuators responded nominal velocity."
         )
 
+        task_res = None
+        if plan and getattr(plan, "task_spec", None) and plan.task_spec.get("action_sequence"):
+            from .tasks.specification import TaskSpecification
+            from .tasks.executor import ClosedLoopExecutor
+            task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
+            import mujoco
+            m_ctx = mujoco.MjModel.from_xml_path(str(model_path))
+            d_ctx = mujoco.MjData(m_ctx)
+            executor = ClosedLoopExecutor()
+            task_res = await executor.execute_task(
+                task_spec_obj,
+                context={
+                    "mujoco_model": m_ctx,
+                    "mujoco_data": d_ctx,
+                    "model_path": str(model_path),
+                    "task_id": task_id,
+                    "simulator": "mujoco",
+                },
+                on_event_cb=on_event_cb,
+            )
+            if task_res.get("test_result"):
+                verification_test = task_res["test_result"]
+
         gui_info = {}
         if not headless:
             emit(TaskStage.LAUNCHING, "Launching interactive MuJoCo 3D viewer on desktop...", speak=True, tool="launch_mujoco_viewer")
@@ -699,15 +745,29 @@ class TaskOrchestrator:
         emit(TaskStage.LAUNCHING, "Launching simulation profile (Robot State Publisher + Sensor Bridge)...", speak=True, tool="launch_simulation_profile")
 
         if is_arm:
-            emit(TaskStage.TESTING, "Testing Joint States (/joint_states) and Wrist Camera (/camera/image_raw) data streams...", tool="sample_topic_messages")
-            test_passed = True
-            verification_test = TestResult(
-                test_id="test_joint_states_payload",
-                passed=True,
-                measured_values={"messages_received": 10, "frequency_hz": 15.0},
-                expected_criteria={"min_messages": 1, "topic": "/joint_states"},
-                log_excerpt="Topic /joint_states streaming nominal joint positions for 6-DOF arm."
-            )
+            if plan and getattr(plan, "task_spec", None) and plan.task_spec.get("task_type") == "manipulation_pick_place":
+                from .tasks.specification import TaskSpecification
+                from .tasks.executor import ClosedLoopExecutor
+                task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
+                executor = ClosedLoopExecutor()
+                primary_test = plan.verification_tests[0] if (plan and plan.verification_tests) else "test_joint_states_payload"
+                task_res = await executor.execute_task(
+                    task_spec_obj,
+                    context={"simulator": "gazebo_harmonic", "task_id": task_id, "workspace_dir": str(ws), "primary_test_id": primary_test},
+                    on_event_cb=on_event_cb,
+                )
+                test_passed = task_res["success"]
+                verification_test = task_res["test_result"]
+            else:
+                emit(TaskStage.TESTING, "Testing Joint States (/joint_states) and Wrist Camera (/camera/image_raw) data streams...", tool="sample_topic_messages")
+                test_passed = True
+                verification_test = TestResult(
+                    test_id="test_joint_states_payload",
+                    passed=True,
+                    measured_values={"messages_received": 10, "frequency_hz": 15.0},
+                    expected_criteria={"min_messages": 1, "topic": "/joint_states"},
+                    log_excerpt="Topic /joint_states streaming nominal joint positions for 6-DOF arm."
+                )
         else:
             emit(TaskStage.TESTING, "Testing LiDAR (/scan) and Camera (/camera/image_raw) data streams...", tool="sample_topic_messages")
 
@@ -903,12 +963,26 @@ class TaskOrchestrator:
                 source_mode="live", status="passed" if passed else "failed",
             )
             if passed:
-                emit(TaskStage.COMPLETED, f"Live sensor samples and payload checks passed for {primary_name} and camera. Phase 3 complete!", severity="success", speak=True)
-                if not headless:
-                    emit(TaskStage.COMPLETED, "Phase 3 verification complete! Launching Gazebo 3D simulation window...", tool="open_gazebo_gui")
-                    await asyncio.to_thread(self.ws_mgr.open_gazebo_gui, ws)
-                return {"task_id": task_id, "stage": TaskStage.COMPLETED, "test_result": verification_test,
-                        "workspace_dir": str(ws), "source_mode": "live", "runtime_pid": launch.get("pid")}
+                if is_arm and plan and getattr(plan, "task_spec", None) and plan.task_spec.get("task_type") == "manipulation_pick_place":
+                    from .tasks.specification import TaskSpecification
+                    from .tasks.executor import ClosedLoopExecutor
+                    task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
+                    executor = ClosedLoopExecutor()
+                    task_res = await executor.execute_task(
+                        task_spec_obj,
+                        context={"simulator": "gazebo_harmonic", "task_id": task_id, "workspace_dir": str(ws)},
+                        on_event_cb=on_event_cb,
+                    )
+                    passed = task_res["success"]
+                    verification_test = task_res["test_result"]
+
+                if passed:
+                    emit(TaskStage.COMPLETED, f"Live sensor samples and payload checks passed for {primary_name} and camera. Phase 3 complete!", severity="success", speak=True)
+                    if not headless:
+                        emit(TaskStage.COMPLETED, "Phase 3 verification complete! Launching Gazebo 3D simulation window...", tool="open_gazebo_gui")
+                        await asyncio.to_thread(self.ws_mgr.open_gazebo_gui, ws)
+                    return {"task_id": task_id, "stage": TaskStage.COMPLETED, "test_result": verification_test,
+                            "workspace_dir": str(ws), "source_mode": "live", "runtime_pid": launch.get("pid")}
 
             emit(TaskStage.DIAGNOSING, "At least one live sensor stream failed its sample or payload check.", severity="warning", speak=True)
             failed_topic = primary_topic if not primary_ok else "/camera/image_raw"

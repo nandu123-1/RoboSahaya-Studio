@@ -212,6 +212,28 @@ class RoboSahayaStudioApp:
         sim_adapter = getattr(plan, "simulator_adapter", "gazebo")
         model_fmt = getattr(plan, "model_format", "URDF/SDF")
 
+        task_section = ""
+        spec = getattr(plan, "task_spec", None)
+        if spec:
+            t_type = spec.get("task_type", "general").upper()
+            targets = ", ".join(f"`{t}`" for t in spec.get("target_objects", [])) or "*None*"
+            dest = f"`{spec.get('destination')}`" if spec.get("destination") else "*None*"
+            caps = ", ".join(f"`{c}`" for c in spec.get("required_capabilities", [])) or "*None*"
+            action_lines = []
+            for step in spec.get("action_sequence", []):
+                action_lines.append(f"  {step.get('step_index')}. **{step.get('description')}** (`{step.get('skill_id')}`)")
+            action_str = "\n".join(action_lines) if action_lines else "  *(None)*"
+
+            task_section = f"""
+- **🎯 Autonomous Task Specification & Skills Sequence:**
+  - **Task Type:** `{t_type}`
+  - **Target Objects:** {targets}
+  - **Destination Target:** {dest}
+  - **Required Capabilities:** {caps}
+  - **Planned Action Sequence:**
+{action_str}
+"""
+
         return f"""{stale_alert}### 📋 Plan Status: APPROVED FOR EXECUTION
 **Mode:** `{selection_mode_badge}` | **Plan Digest:** {digest_display}
 
@@ -225,6 +247,7 @@ class RoboSahayaStudioApp:
 - **Permission Tiers:** {tiers_str}
 - **Planned Verification Tests:** {tests_str}
 - **Expected Behavior:** *{plan.expected_behavior or 'Nominal sensor streams and Gazebo simulation.'}*
+{task_section}
 {mcp_section}
 - **Assumptions & Safety Boundaries:**
   - {plan.assumptions[0] if plan.assumptions else 'Standard ROS 2 Jazzy & Gazebo Harmonic runtime'}

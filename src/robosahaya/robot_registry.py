@@ -99,6 +99,11 @@ class RobotRegistry:
         if norm in self._alias_map:
             return self._models[self._alias_map[norm]]
 
+        # Runtime template ID lookup
+        for model in self._models.values():
+            if model.runtime_template_id == identifier_or_alias:
+                return model
+
         # Substring alias search
         for alias_norm, model_id in self._alias_map.items():
             if norm == alias_norm:

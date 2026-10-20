@@ -365,5 +365,7 @@ class TaskPlan(StrictModel):
     simulator_adapter: str = "gazebo_harmonic"
     model_format: str = "URDF"
     milestones: Dict[str, Any] = Field(default_factory=dict)
+    task_spec: Optional[Dict[str, Any]] = Field(default=None)
+    action_steps: List[Dict[str, Any]] = Field(default_factory=list)
 
 
