@@ -1119,9 +1119,19 @@ def create_ui() -> gr.Blocks:
                         return "### ⚠️ No robot model selected."
                     decision = robot_catalog.evaluate_readiness(model_id)
                     d = decision.dimensions
+                    try:
+                        from .cloud.verify_runtimes import get_runtime_verifier
+                        verifier = get_runtime_verifier()
+                        sync_st = verifier.compute_sync_state(model_id)
+                        sync_header = f" | **Cloud Sync:** `{sync_st.display_label}`"
+                        sync_info = f"\n**Cloud Sync & Asset Telemetry:**\n- **Status:** `{sync_st.status.value}` ({sync_st.display_label})\n- **Local Assets:** `{sync_st.local_assets_count}` files\n- **Remote Assets (Supabase Storage):** `{sync_st.remote_assets_count}` objects registered\n- **Details:** {sync_st.details}\n"
+                    except Exception:
+                        sync_header = ""
+                        sync_info = ""
+
                     blockers_md = "\n".join(f"- 🔴 {b}" for b in decision.blockers) if decision.blockers else "*(None — all required preconditions met)*"
                     return f"""### 📊 Authoritative 9-Dimensional Readiness: `{model_id}` ({decision.model_version})
-**Overall Execution Verdict:** `{decision.summary_label}`
+**Overall Execution Verdict:** `{decision.summary_label}`{sync_header}
 
 | Dimension | Verified Status | Meaning |
 |---|---|---|
@@ -1134,7 +1144,7 @@ def create_ui() -> gr.Blocks:
 | **7. Controller Readiness** | `{d.controller_readiness.value}` | Actuator control response verified |
 | **8. Sensor Readiness** | `{d.sensor_readiness.value}` | Topic stream telemetry verified |
 | **9. Task Verification** | `{d.task_verification.value}` | E2E task success criteria met |
-
+{sync_info}
 **Identified Blockers / Preconditions:**
 {blockers_md}
 """
@@ -1145,9 +1155,9 @@ def create_ui() -> gr.Blocks:
                     rep = robot_catalog.verify_runtime(model_id, sync_to_cloud=True)
                     blockers_md = "\n".join(f"- 🔴 {b}" for b in rep.decision.blockers) if rep.decision.blockers else "*(None — all required dimensions verified)*"
                     checks_summary = "\n".join(f"- {'✅' if c.status == 'PASSED' else '⚠️' if c.status == 'SKIPPED' else '🔴'} **{c.name}**: `{c.status}` — {c.observed or c.error_message or ''}" for c in rep.decision.evidence_checks)
-                    cloud_note = "✅ Synchronized to Supabase Postgres (tables: robot_models, robot_model_versions, robot_runtime_compatibility, robot_verification_runs)" if rep.cloud_synced else "🟡 Local verification only (offline / uncommitted)"
+                    cloud_note = f"**{rep.sync_state.display_label}** ({rep.sync_state.details})" if getattr(rep, "sync_state", None) else ("✅ Synchronized to Supabase" if rep.cloud_synced else "💻 Local only")
                     markdown_out = f"""### ⚡ Runtime Verification Result: `{rep.display_name}`
-**Target Simulator:** `{rep.simulator}` | **Execution Verdict:** `{rep.decision.summary_label}` | **Cloud State:** {cloud_note}
+**Target Simulator:** `{rep.simulator}` | **Execution Verdict:** `{rep.decision.summary_label}` | **Cloud Sync State:** {cloud_note}
 
 #### 🔬 Evidence Checks
 {checks_summary}
@@ -1160,7 +1170,7 @@ def create_ui() -> gr.Blocks:
                 def on_verify_all_runtimes():
                     reports = robot_catalog.verify_all_runtimes(sync_to_cloud=True)
                     ready_count = sum(r.decision.is_ready for r in reports)
-                    synced_count = sum(r.cloud_synced for r in reports)
+                    synced_count = sum(getattr(r.sync_state, 'status', None) == 'synced' or r.cloud_synced for r in reports)
                     rows = robot_catalog.format_verification_table_rows(reports)
                     summary_md = f"""### 🚀 Verified All {len(reports)} Robot Model Runtimes
 - **Execution Ready:** `{ready_count} / {len(reports)}` models verified for real simulation & control.

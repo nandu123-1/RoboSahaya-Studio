@@ -31,6 +31,16 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
         self.service_key = service_key or ""
         self.timeout = timeout
         self._rest_url = f"{self.base_url}/rest/v1" if self.base_url else ""
+        self._client: Optional[httpx.Client] = None
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
+
+    def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            self._client.close()
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -44,9 +54,9 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
         if not self._rest_url or not self.service_key:
             return False
         try:
-            with httpx.Client(timeout=3.0) as client:
-                res = client.get(f"{self._rest_url}/robot_models?select=id&limit=1", headers=self._headers())
-                return res.status_code in (200, 206)
+            client = self._get_client()
+            res = client.get(f"{self._rest_url}/robot_models?select=id&limit=1", headers=self._headers())
+            return res.status_code in (200, 206)
         except Exception:
             return False
 
@@ -61,15 +71,47 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
                 clean_s = search.strip().replace("'", "")
                 params["or"] = f"(id.ilike.%{clean_s}%,display_name.ilike.%{clean_s}%)"
 
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.get(f"{self._rest_url}/robot_models", headers=self._headers(), params=params)
-                if res.status_code != 200:
-                    logger.warning("Supabase list_models query returned status %d", res.status_code)
-                    return []
+            client = self._get_client()
+            res = client.get(f"{self._rest_url}/robot_models", headers=self._headers(), params=params)
+            if res.status_code != 200:
+                logger.warning("Supabase list_models query returned status %d", res.status_code)
+                return []
+            data = res.json()
+            records = []
+            for row in data:
+                records.append(CloudModelRecord(
+                    id=row["id"],
+                    display_name=row["display_name"],
+                    family=row["family"],
+                    description=row.get("description", ""),
+                    manufacturer=row.get("manufacturer", "Unknown"),
+                    aliases=row.get("aliases") or [],
+                    default_version=row.get("default_model_version", "v1.0.0"),
+                    catalogue_status=row.get("catalogue_status", "catalogued"),
+                    licence=row.get("licence_identifier", "Check upstream source"),
+                    licence_url=row.get("licence_url", ""),
+                    metadata=row.get("metadata_json") or {},
+                ))
+            return records
+        except Exception as e:
+            logger.warning("Error querying Supabase models: %s", str(e))
+            return []
+
+    def get_model(self, model_id: str) -> Optional[CloudModelRecord]:
+        if not self._rest_url or not self.service_key or not model_id:
+            return None
+        try:
+            client = self._get_client()
+            res = client.get(
+                f"{self._rest_url}/robot_models",
+                headers=self._headers(),
+                params={"id": f"eq.{model_id}", "select": "*", "limit": "1"}
+            )
+            if res.status_code == 200:
                 data = res.json()
-                records = []
-                for row in data:
-                    records.append(CloudModelRecord(
+                if data:
+                    row = data[0]
+                    return CloudModelRecord(
                         id=row["id"],
                         display_name=row["display_name"],
                         family=row["family"],
@@ -81,39 +123,7 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
                         licence=row.get("licence_identifier", "Check upstream source"),
                         licence_url=row.get("licence_url", ""),
                         metadata=row.get("metadata_json") or {},
-                    ))
-                return records
-        except Exception as e:
-            logger.warning("Error querying Supabase models: %s", str(e))
-            return []
-
-    def get_model(self, model_id: str) -> Optional[CloudModelRecord]:
-        if not self._rest_url or not self.service_key or not model_id:
-            return None
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.get(
-                    f"{self._rest_url}/robot_models",
-                    headers=self._headers(),
-                    params={"id": f"eq.{model_id}", "select": "*", "limit": "1"}
-                )
-                if res.status_code == 200:
-                    data = res.json()
-                    if data:
-                        row = data[0]
-                        return CloudModelRecord(
-                            id=row["id"],
-                            display_name=row["display_name"],
-                            family=row["family"],
-                            description=row.get("description", ""),
-                            manufacturer=row.get("manufacturer", "Unknown"),
-                            aliases=row.get("aliases") or [],
-                            default_version=row.get("default_model_version", "v1.0.0"),
-                            catalogue_status=row.get("catalogue_status", "catalogued"),
-                            licence=row.get("licence_identifier", "Check upstream source"),
-                            licence_url=row.get("licence_url", ""),
-                            metadata=row.get("metadata_json") or {},
-                        )
+                    )
         except Exception as e:
             logger.warning("Error fetching model '%s' from Supabase: %s", model_id, str(e))
         return None
@@ -139,9 +149,9 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             }
             headers = self._headers()
             headers["Prefer"] = "resolution=merge-duplicates"
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.post(f"{self._rest_url}/robot_models", headers=headers, json=payload)
-                return res.status_code in (200, 201)
+            client = self._get_client()
+            res = client.post(f"{self._rest_url}/robot_models", headers=headers, json=payload)
+            return res.status_code in (200, 201)
         except Exception as e:
             logger.warning("Error upserting model '%s' to Supabase: %s", model.id, str(e))
             return False
@@ -156,25 +166,25 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             else:
                 params["order"] = "created_at.desc"
 
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.get(f"{self._rest_url}/robot_model_versions", headers=self._headers(), params=params)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data:
-                        row = data[0]
-                        return CloudVersionRecord(
-                            id=row["id"],
-                            robot_model_id=row["robot_model_id"],
-                            version=row["version"],
-                            source_type=row.get("source_type", "upstream"),
-                            source_repository=row.get("source_repository", ""),
-                            source_revision=row.get("source_revision", ""),
-                            description_format=row["description_format"],
-                            entrypoint_path=row["entrypoint_path"],
-                            manifest_path=row.get("manifest_path", ""),
-                            content_fingerprint=row["content_fingerprint"],
-                            validation_metadata=row.get("validation_metadata") or {},
-                        )
+            client = self._get_client()
+            res = client.get(f"{self._rest_url}/robot_model_versions", headers=self._headers(), params=params)
+            if res.status_code == 200:
+                data = res.json()
+                if data:
+                    row = data[0]
+                    return CloudVersionRecord(
+                        id=row["id"],
+                        robot_model_id=row["robot_model_id"],
+                        version=row["version"],
+                        source_type=row.get("source_type", "upstream"),
+                        source_repository=row.get("source_repository", ""),
+                        source_revision=row.get("source_revision", ""),
+                        description_format=row["description_format"],
+                        entrypoint_path=row["entrypoint_path"],
+                        manifest_path=row.get("manifest_path", ""),
+                        content_fingerprint=row["content_fingerprint"],
+                        validation_metadata=row.get("validation_metadata") or {},
+                    )
         except Exception as e:
             logger.warning("Error fetching version for '%s': %s", model_id, str(e))
         return None
@@ -198,9 +208,9 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             }
             headers = self._headers()
             headers["Prefer"] = "resolution=merge-duplicates"
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.post(f"{self._rest_url}/robot_model_versions", headers=headers, json=payload)
-                return res.status_code in (200, 201)
+            client = self._get_client()
+            res = client.post(f"{self._rest_url}/robot_model_versions", headers=headers, json=payload)
+            return res.status_code in (200, 201)
         except Exception as e:
             logger.warning("Error upserting version '%s' to Supabase: %s", version.id, str(e))
             return False
@@ -209,30 +219,54 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
         if not self._rest_url or not self.service_key or not version_id:
             return []
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.get(
-                    f"{self._rest_url}/robot_model_assets",
-                    headers=self._headers(),
-                    params={"robot_model_version_id": f"eq.{version_id}", "select": "*"}
-                )
-                if res.status_code == 200:
-                    records = []
-                    for row in res.json():
-                        records.append(CloudAssetRecord(
-                            id=row["id"],
-                            version_id=row["robot_model_version_id"],
-                            relative_path=row["relative_path"],
-                            asset_type=row["asset_type"],
-                            object_storage_key=row.get("object_storage_key", ""),
-                            upstream_reference=row.get("upstream_reference", ""),
-                            sha256=row["sha256"],
-                            size_bytes=row.get("size_bytes", 0),
-                            required=row.get("required", True),
-                        ))
-                    return records
+            client = self._get_client()
+            res = client.get(
+                f"{self._rest_url}/robot_model_assets",
+                headers=self._headers(),
+                params={"robot_model_version_id": f"eq.{version_id}", "select": "*"}
+            )
+            if res.status_code == 200:
+                records = []
+                for row in res.json():
+                    records.append(CloudAssetRecord(
+                        id=row["id"],
+                        version_id=row["robot_model_version_id"],
+                        relative_path=row["relative_path"],
+                        asset_type=row["asset_type"],
+                        object_storage_key=row.get("object_storage_key", ""),
+                        upstream_reference=row.get("upstream_reference", ""),
+                        sha256=row["sha256"],
+                        size_bytes=row.get("size_bytes", 0),
+                        required=row.get("required", True),
+                    ))
+                return records
         except Exception as e:
             logger.warning("Error fetching assets for version '%s': %s", version_id, str(e))
         return []
+
+    def upsert_asset(self, asset: CloudAssetRecord) -> bool:
+        if not self._rest_url or not self.service_key:
+            return False
+        try:
+            payload = {
+                "id": asset.id,
+                "robot_model_version_id": asset.version_id,
+                "relative_path": asset.relative_path,
+                "asset_type": asset.asset_type,
+                "object_storage_key": asset.object_storage_key,
+                "upstream_reference": asset.upstream_reference,
+                "sha256": asset.sha256,
+                "size_bytes": asset.size_bytes,
+                "required": asset.required,
+            }
+            headers = self._headers()
+            headers["Prefer"] = "resolution=merge-duplicates"
+            client = self._get_client()
+            res = client.post(f"{self._rest_url}/robot_model_assets", headers=headers, json=payload)
+            return res.status_code in (200, 201)
+        except Exception as e:
+            logger.warning("Error upserting asset '%s' to Supabase: %s", asset.id, str(e))
+            return False
 
     def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:
         if not self._rest_url or not self.service_key:
@@ -255,9 +289,9 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             }
             headers = self._headers()
             headers["Prefer"] = "resolution=merge-duplicates"
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.post(f"{self._rest_url}/robot_runtime_compatibility", headers=headers, json=payload)
-                return res.status_code in (200, 201)
+            client = self._get_client()
+            res = client.post(f"{self._rest_url}/robot_runtime_compatibility", headers=headers, json=payload)
+            return res.status_code in (200, 201)
         except Exception as e:
             logger.warning("Failed to upsert runtime compatibility for '%s': %s", compat.id, str(e))
             return False
@@ -282,9 +316,9 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             }
             headers = self._headers()
             headers["Prefer"] = "resolution=merge-duplicates"
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.post(f"{self._rest_url}/robot_verification_runs", headers=headers, json=payload)
-                return res.status_code in (200, 201)
+            client = self._get_client()
+            res = client.post(f"{self._rest_url}/robot_verification_runs", headers=headers, json=payload)
+            return res.status_code in (200, 201)
         except Exception as e:
             logger.warning("Failed to record verification run to Supabase: %s", str(e))
             return False

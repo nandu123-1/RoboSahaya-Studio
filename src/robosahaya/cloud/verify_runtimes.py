@@ -32,7 +32,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from robosahaya.cloud.base import (
     BaseCatalogueProvider,
     CloudModelRecord,
+    CloudSyncStatus,
     CloudVersionRecord,
+    ModelSyncState,
     RuntimeCompatibilityRecord,
     VerificationRunRecord,
 )
@@ -72,6 +74,7 @@ class ModelRuntimeVerificationReport:
     simulator: str
     decision: ReadinessDecision
     cloud_synced: bool = False
+    sync_state: Optional[ModelSyncState] = None
     verified_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     details: Dict[str, Any] = field(default_factory=dict)
 
@@ -83,6 +86,7 @@ class ModelRuntimeVerificationReport:
             "simulator": self.simulator,
             "decision": self.decision.to_dict(),
             "cloud_synced": self.cloud_synced,
+            "sync_state": self.sync_state.to_dict() if self.sync_state else None,
             "verified_at": self.verified_at,
             "details": self.details,
         }
@@ -231,13 +235,17 @@ class RuntimeVerifier:
 
         decision = evaluate_execution_readiness(profile, dimensions, evidence_checks=checks)
 
+        # Authoritative cloud synchronization state
+        sync_state = self.compute_sync_state(model.id)
+
         report = ModelRuntimeVerificationReport(
             robot_id=model.id,
             display_name=model.display_name,
             family=model.family,
             simulator=target_sim,
             decision=decision,
-            cloud_synced=False,
+            cloud_synced=(sync_state.status == CloudSyncStatus.SYNCED),
+            sync_state=sync_state,
             verified_at=start_time,
             details=details,
         )
@@ -246,6 +254,12 @@ class RuntimeVerifier:
         if sync_to_cloud:
             synced = self.sync_verification_to_cloud(report)
             report.cloud_synced = synced
+            if synced:
+                # Refresh sync state
+                sync_state = self.compute_sync_state(model.id)
+                report.sync_state = sync_state
+                if sync_state.status == CloudSyncStatus.SYNCED:
+                    report.cloud_synced = True
 
         return report
 
@@ -364,6 +378,112 @@ class RuntimeVerifier:
         except Exception as e:
             logger.warning("Failed to sync verification for '%s' to cloud: %s", report.robot_id, str(e))
             return False
+
+    def compute_sync_state(self, robot_id: str, version: str = "v1.0.0") -> ModelSyncState:
+        """Evaluate authoritative cloud sync state between local files and Supabase."""
+        if not self.catalogue.is_connected():
+            return ModelSyncState(
+                robot_id=robot_id,
+                status=CloudSyncStatus.OFFLINE,
+                display_label="🔌 Offline",
+                details="Cloud catalogue provider is offline or unreachable.",
+                local_version=version,
+            )
+
+        # 1. Count local assets
+        local_count = 0
+        model = self.robot_registry.get_model(robot_id)
+        if model is None:
+            catalog_model = self.model_catalog.get_model(robot_id)
+            if catalog_model:
+                model = RobotModel(
+                    id=catalog_model.id,
+                    display_name=catalog_model.display_name,
+                    family=catalog_model.family,
+                    aliases=catalog_model.aliases,
+                    description_module=catalog_model.description_module,
+                    formats=catalog_model.formats,
+                    license=catalog_model.license,
+                    runtime_status=catalog_model.runtime_status,
+                    runtime_template_id=catalog_model.runtime_template_id,
+                )
+
+        if model:
+            if getattr(model, "runtime_template_id", None):
+                tpl_dir = self.templates_root / model.runtime_template_id
+                if tpl_dir.exists():
+                    local_count = len([f for f in tpl_dir.rglob("*") if f.is_file() and "__pycache__" not in str(f)])
+            elif robot_id == "rsk":
+                rsk_dir = Path.home() / ".cache" / "robosahaya" / "robot_models" / "rsk" / version
+                if rsk_dir.exists():
+                    local_count = len([f for f in rsk_dir.rglob("*") if f.is_file() and "__pycache__" not in str(f)])
+            else:
+                cache_base = Path.home() / ".cache" / "robot_descriptions"
+                known_dirs = {
+                    "so_arm100": cache_base / "SO-ARM100",
+                    "ur5e": cache_base / "ur_description",
+                    "unitree_go2": cache_base / "unitree_ros",
+                    "skydio_x2": cache_base / "skydio_x2_description",
+                }
+                if robot_id in known_dirs and known_dirs[robot_id].exists():
+                    local_count = len([f for f in known_dirs[robot_id].rglob("*") if f.is_file()])
+
+        # 2. Query cloud assets and version
+        version_id = f"{robot_id}_{version}"
+        remote_assets = self.catalogue.list_assets(version_id)
+        remote_count = len(remote_assets)
+        cloud_version_rec = self.catalogue.get_version(robot_id, version)
+        cloud_version_str = cloud_version_rec.version if cloud_version_rec else None
+
+        # 3. Determine status and label
+        is_offline_provider = (self.catalogue.__class__.__name__ == "OfflineCatalogueProvider")
+        if is_offline_provider:
+            if cloud_version_rec or remote_count > 0:
+                status = CloudSyncStatus.SYNCED
+                display_label = "☁️ Synced"
+                details = f"Synchronized in local offline catalogue provider ({local_count} local files)."
+            else:
+                status = CloudSyncStatus.LOCAL_ONLY
+                display_label = "💻 Local only"
+                details = f"Local template available ({local_count} files); not recorded in offline catalogue."
+        elif remote_count > 0 and local_count > 0:
+            status = CloudSyncStatus.SYNCED
+            display_label = "☁️ Synced"
+            details = f"All {remote_count} assets and records synchronized to Supabase bucket 'robot-model-packages'."
+        elif local_count > 0 and remote_count == 0:
+            if cloud_version_rec:
+                status = CloudSyncStatus.REMOTE_ASSET_MISSING
+                display_label = "⚠️ Remote Assets Missing"
+                details = f"Model version registered in cloud, but object storage assets are missing ({local_count} local files)."
+            else:
+                status = CloudSyncStatus.LOCAL_ONLY
+                display_label = "💻 Local only"
+                details = f"{local_count} local files present; not synchronized to Supabase cloud."
+        elif local_count == 0 and remote_count > 0:
+            status = CloudSyncStatus.LOCAL_CACHE_MISSING
+            display_label = "📥 Cloud Stored (Not Cached)"
+            details = f"{remote_count} assets stored in Supabase; not cached locally."
+        else:
+            cloud_model = self.catalogue.get_model(robot_id)
+            if cloud_model:
+                status = CloudSyncStatus.CLOUD_AVAILABLE
+                display_label = "☁️ Catalogue Only"
+                details = "Metadata catalogued in cloud; no physical assets uploaded."
+            else:
+                status = CloudSyncStatus.LOCAL_ONLY
+                display_label = "💻 Local only"
+                details = "Model only present in local definition."
+
+        return ModelSyncState(
+            robot_id=robot_id,
+            status=status,
+            display_label=display_label,
+            details=details,
+            local_version=version,
+            cloud_version=cloud_version_str,
+            local_assets_count=local_count,
+            remote_assets_count=remote_count,
+        )
 
     def _check_local_cache(self, model: RobotModel) -> Tuple[LocalCacheStatus, CheckResult]:
         """Dimension 3: Check local cache integrity and assets."""
@@ -520,17 +640,6 @@ class RuntimeVerifier:
 
     def _check_simulator_compatibility(self, model: RobotModel, simulator: str) -> Tuple[SimulatorCompatibility, CheckResult]:
         """Dimension 5: Check simulator engine availability and format match."""
-        # Drones currently have no integrated flight dynamics adapter
-        if model.family in ("drone/aerial",) or model.id == "skydio_x2":
-            return SimulatorCompatibility.SIMULATOR_UNAVAILABLE, CheckResult(
-                check_id="sim_compat",
-                name="Simulator Compatibility",
-                status="BLOCKED",
-                observed="drone/aerial",
-                expected="Supported flight dynamics adapter",
-                error_message=f"Aerial drone flight dynamics adapter for simulator '{simulator}' is not yet integrated.",
-            )
-
         adapter = self.simulator_registry.get_adapter(simulator)
         if not adapter:
             return SimulatorCompatibility.SIMULATOR_UNAVAILABLE, CheckResult(
@@ -602,7 +711,7 @@ class RuntimeVerifier:
             "so_arm100": "Simulation template not bundled; recommend using so_arm101 for verified Gazebo execution.",
             "ur5e": "Gazebo ros2_control launch package not bundled in RoboSahaya Studio.",
             "unitree_go2": "Quadruped whole-body control and contact physics not yet runtime verified.",
-            "skydio_x2": "Aerial flight dynamics simulation not yet integrated.",
+            "skydio_x2": "Aerial multicopter motor dynamics plugin ('gz-sim-multicopter-motor-model-system') missing from Gazebo simulation template.",
         }
         msg = reasons.get(model.id, f"Model has not passed simulation load/physics step tests in '{simulator}'.")
         return SimulationReadiness.UNTESTED, CheckResult(
@@ -649,6 +758,35 @@ class RuntimeVerifier:
                 expected="Actuator command response verified",
             )
 
+        if model.id == "skydio_x2":
+            return ControllerReadiness.CONTROLLER_MISSING, CheckResult(
+                check_id="ctrl_readiness",
+                name="Actuator Controller Verification",
+                status="BLOCKED",
+                error_message="Aerial autopilot flight controller (PX4/ROS 2 bridge) not configured.",
+            )
+        if model.id == "unitree_go2":
+            return ControllerReadiness.CONTROLLER_MISSING, CheckResult(
+                check_id="ctrl_readiness",
+                name="Actuator Controller Verification",
+                status="BLOCKED",
+                error_message="Quadruped 12-actuator whole-body locomotion controller (convex MPC / WBC) not configured in RoboSahaya Studio.",
+            )
+        if model.id == "ur5e":
+            return ControllerReadiness.CONTROLLER_MISSING, CheckResult(
+                check_id="ctrl_readiness",
+                name="Actuator Controller Verification",
+                status="BLOCKED",
+                error_message="UR5e joint_trajectory_controller and forward_position_controller configurations not bundled.",
+            )
+        if model.id == "so_arm100":
+            return ControllerReadiness.CONTROLLER_MISSING, CheckResult(
+                check_id="ctrl_readiness",
+                name="Actuator Controller Verification",
+                status="BLOCKED",
+                error_message="Feetech STS3215 ros2_control actuator plugins missing from so_arm100 URDF (use verified so_arm101).",
+            )
+
         return ControllerReadiness.CONTROLLER_MISSING, CheckResult(
             check_id="ctrl_readiness",
             name="Actuator Controller Verification",
@@ -685,11 +823,18 @@ class RuntimeVerifier:
                 expected="Task verification criteria met",
             )
 
+        task_notes = {
+            "skydio_x2": "Aerial waypoint navigation and hover skills unverified.",
+            "unitree_go2": "Quadruped locomotion and trotting gait execution unverified.",
+            "ur5e": "6-DOF arm trajectory execution and pick-and-place skills unverified for UR5e.",
+            "so_arm100": "Task skills configured for so_arm101, not so_arm100.",
+        }
+        note = task_notes.get(model.id, "Task execution pipeline unverified.")
         return TaskVerification.UNTESTED, CheckResult(
             check_id="task_ver",
             name="Task Execution Criteria",
             status="SKIPPED",
-            error_message="Task execution pipeline unverified.",
+            error_message=note,
         )
 
 

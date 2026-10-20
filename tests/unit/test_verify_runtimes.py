@@ -6,6 +6,7 @@ from robosahaya.cloud.offline_provider import OfflineCatalogueProvider
 from robosahaya.cloud.verify_runtimes import RuntimeVerifier, get_runtime_verifier
 from robosahaya.readiness import (
     CatalogueStatus,
+    ControllerReadiness,
     ExecutionStatus,
     LocalCacheStatus,
     SimulationReadiness,
@@ -80,11 +81,14 @@ def test_verifier_unready_robots_honest_blockers():
     assert r_go2.decision.execution_status == ExecutionStatus.BLOCKED
     assert any("simulation load/physics step" in b for b in r_go2.decision.blockers)
 
-    # 4. Skydio X2 (Drone, flight dynamics adapter unavailable)
+    # 4. Skydio X2 (Drone, simulator compatible, flight dynamics plugin missing)
     r_x2 = verifier.verify_robot("skydio_x2", sync_to_cloud=True)
     assert r_x2.decision.is_ready is False
     assert r_x2.decision.execution_status == ExecutionStatus.BLOCKED
-    assert r_x2.decision.dimensions.simulator_compatibility == SimulatorCompatibility.SIMULATOR_UNAVAILABLE
+    assert r_x2.decision.dimensions.simulator_compatibility == SimulatorCompatibility.COMPATIBLE
+    assert r_x2.decision.dimensions.simulation_readiness == SimulationReadiness.UNTESTED
+    assert r_x2.decision.dimensions.controller_readiness == ControllerReadiness.CONTROLLER_MISSING
+    assert any("simulation load/physics step" in b for b in r_x2.decision.blockers)
 
 
 def test_verifier_verify_all_robots():

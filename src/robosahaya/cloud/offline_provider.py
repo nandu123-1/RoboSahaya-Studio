@@ -33,7 +33,7 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
         self._compatibilities: Dict[str, RuntimeCompatibilityRecord] = {}
         self._verification_runs: List[VerificationRunRecord] = []
 
-        if seeded_models:
+        if seeded_models is not None:
             for m in seeded_models:
                 self._models[m.id] = m
         else:
@@ -192,6 +192,15 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
 
     def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
         return self._assets.get(version_id, [])
+
+    def upsert_asset(self, asset: CloudAssetRecord) -> bool:
+        assets = self._assets.setdefault(asset.version_id, [])
+        for idx, a in enumerate(assets):
+            if a.relative_path == asset.relative_path:
+                assets[idx] = asset
+                return True
+        assets.append(asset)
+        return True
 
     def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:
         self._compatibilities[compat.id] = compat

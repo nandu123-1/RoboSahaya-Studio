@@ -7,8 +7,51 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+class CloudSyncStatus(str, Enum):
+    LOCAL_ONLY = "local_only"
+    CLOUD_AVAILABLE = "cloud_available"
+    PENDING_UPLOAD = "pending_upload"
+    UPLOADING = "uploading"
+    SYNCED = "synced"
+    SYNC_FAILED = "sync_failed"
+    VERSION_CONFLICT = "version_conflict"
+    REMOTE_ASSET_MISSING = "remote_asset_missing"
+    LOCAL_CACHE_MISSING = "local_cache_missing"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ModelSyncState:
+    robot_id: str
+    status: CloudSyncStatus
+    display_label: str
+    details: str
+    local_version: str = "v1.0.0"
+    cloud_version: Optional[str] = None
+    local_assets_count: int = 0
+    remote_assets_count: int = 0
+    verified_run_count: int = 0
+    last_synced_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "robot_id": self.robot_id,
+            "status": self.status.value,
+            "display_label": self.display_label,
+            "details": self.details,
+            "local_version": self.local_version,
+            "cloud_version": self.cloud_version,
+            "local_assets_count": self.local_assets_count,
+            "remote_assets_count": self.remote_assets_count,
+            "verified_run_count": self.verified_run_count,
+            "last_synced_at": self.last_synced_at,
+        }
 
 
 @dataclass
@@ -16,7 +59,7 @@ class CloudModelRecord:
     id: str
     display_name: str
     family: str
-    description: str
+    description: str = ""
     manufacturer: str = "Unknown"
     aliases: List[str] = field(default_factory=list)
     default_version: str = "v1.0.0"
@@ -31,13 +74,13 @@ class CloudVersionRecord:
     id: str
     robot_model_id: str
     version: str
-    source_type: str
-    source_repository: str
-    source_revision: str
-    description_format: str
-    entrypoint_path: str
-    manifest_path: str
-    content_fingerprint: str
+    source_type: str = "upstream"
+    source_repository: str = ""
+    source_revision: str = "head"
+    description_format: str = "URDF"
+    entrypoint_path: str = ""
+    manifest_path: str = "manifest.json"
+    content_fingerprint: str = ""
     validation_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -48,9 +91,9 @@ class CloudAssetRecord:
     relative_path: str
     asset_type: str
     object_storage_key: str
-    upstream_reference: str
-    sha256: str
-    size_bytes: int
+    upstream_reference: str = ""
+    sha256: str = ""
+    size_bytes: int = 0
     required: bool = True
 
 
@@ -122,6 +165,11 @@ class BaseCatalogueProvider(ABC):
     @abstractmethod
     def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
         """List all asset records belonging to a model version."""
+        ...
+
+    @abstractmethod
+    def upsert_asset(self, asset: CloudAssetRecord) -> bool:
+        """Persist or update a model asset record."""
         ...
 
     @abstractmethod

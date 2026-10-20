@@ -496,7 +496,10 @@ class RobotModelCatalog:
         rows = []
         for r in reports:
             status = "Ready" if r.decision.is_ready else "Blocked"
-            synced = "✅ Synced" if r.cloud_synced else "Local only"
+            if hasattr(r, "sync_state") and r.sync_state:
+                synced = r.sync_state.display_label
+            else:
+                synced = "☁️ Synced" if r.cloud_synced else "💻 Local only"
             blocker_note = "; ".join(r.decision.blockers[:2]) if r.decision.blockers else "All 9 dimensions verified"
             rows.append([
                 r.display_name,
