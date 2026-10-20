@@ -511,3 +511,55 @@ class RobotModelCatalog:
                 blocker_note,
             ])
         return rows
+
+    def get_sync_inventory(self, refresh_remote: bool = True) -> Any:
+        """Build canonical synchronization inventory across all models."""
+        from .cloud.sync_service import get_sync_service
+        return get_sync_service().build_inventory(force_refresh=refresh_remote)
+
+    def sync_all_models(
+        self,
+        only_cached: bool = False,
+        dry_run: bool = False,
+        progress_cb: Optional[Any] = None,
+    ) -> Any:
+        """Run batch bulk synchronization of all eligible robot models."""
+        from .cloud.sync_service import get_sync_service
+        return get_sync_service().sync_all_robot_models(
+            only_cached=only_cached, dry_run=dry_run, progress_callback=progress_cb
+        )
+
+    def sync_model(self, robot_id: str, dry_run: bool = False) -> Any:
+        """Synchronize an individual robot model to cloud database and storage."""
+        from .cloud.sync_service import get_sync_service
+        return get_sync_service().sync_single_robot(robot_id, dry_run=dry_run)
+
+    def verify_cloud_assets(self) -> Any:
+        """Audit remote object storage integrity for all registered model assets."""
+        from .cloud.sync_service import get_sync_service
+        return get_sync_service().verify_all_cloud_robot_assets()
+
+    def format_sync_table_rows(self, inventory: Optional[Any] = None) -> list[list[str]]:
+        """Format sync inventory into table rows for UI presentation."""
+        if inventory is None:
+            inventory = self.get_sync_inventory(refresh_remote=False)
+        rows = []
+        item_list = inventory.item_list if hasattr(inventory, "item_list") else (inventory.items.values() if isinstance(inventory.items, dict) else inventory.items)
+        for item in item_list:
+            local_summary = (
+                f"{item.local_files_count} files ({item.local_bytes_total // 1024} KB)"
+                if item.local_files_count > 0
+                else "Not cached locally"
+            )
+            exec_badge = "✅ Ready" if item.execution_ready else "🛑 Blocked"
+            rows.append([
+                item.robot_id,
+                item.display_name,
+                item.family,
+                item.declared_license,
+                local_summary,
+                item.sync_label,
+                exec_badge,
+                item.sync_notes or ("; ".join(item.blockers[:1]) if item.blockers else "Ready"),
+            ])
+        return rows

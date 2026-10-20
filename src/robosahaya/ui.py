@@ -1077,6 +1077,35 @@ def create_ui() -> gr.Blocks:
                         col_count=(7, "fixed"),
                     )
 
+                with gr.Accordion("☁️ Bulk Robot Model Cloud Synchronization & Integrity Audit", open=True):
+                    gr.Markdown(
+                        """
+                        ### Universal Supabase Cloud Synchronization Engine
+                        Inventory, validate, and synchronize canonical robot model packages into Supabase Object Storage (`robot-model-packages`) and maintain verified cryptographic asset manifests in Postgres.
+                        *Cloud synchronization is strictly independent from simulator execution readiness.*
+                        """
+                    )
+                    with gr.Row():
+                        scan_inventory_btn = gr.Button("📋 Scan Cloud & Local Inventory", variant="secondary", scale=1)
+                        preview_sync_btn = gr.Button("🔍 Preview Sync (Dry Run)", variant="secondary", scale=1)
+                        sync_all_models_btn = gr.Button("☁️ Sync All Eligible Models to Supabase", variant="primary", scale=2)
+                        verify_cloud_assets_btn = gr.Button("🛡️ Audit Cloud Asset Integrity", variant="secondary", scale=1)
+
+                    bulk_sync_status_md = gr.Markdown(
+                        "*Click 'Scan Cloud & Local Inventory' to inspect local file caches and Supabase remote synchronization state.*"
+                    )
+
+                    sync_inventory_table = gr.Dataframe(
+                        headers=["Robot ID", "Display Name", "Family", "Licence", "Local Assets", "Cloud Sync Status", "Execution Readiness", "Telemetry & Notes"],
+                        datatype=["str", "str", "str", "str", "str", "str", "str", "str"],
+                        interactive=False,
+                        wrap=True,
+                        value=robot_catalog.format_sync_table_rows(),
+                        label="Universal Robot Synchronization Inventory",
+                        row_count=(10, "dynamic"),
+                        col_count=(8, "fixed"),
+                    )
+
                 def refresh_catalog(search_text="", family="All", selected=None):
                     models = robot_catalog.list_models(search=search_text or "", family=family or "All")
                     choices = [(f"{m.display_name} — {'bundled pipeline template' if m.runtime_ready else 'description only; not runtime verified'}", m.id) for m in models]
@@ -1179,6 +1208,35 @@ def create_ui() -> gr.Blocks:
 """
                     return summary_md, rows
 
+                def on_scan_sync_inventory():
+                    inv = robot_catalog.get_sync_inventory(refresh_remote=True)
+                    rows = robot_catalog.format_sync_table_rows(inv)
+                    summary = (
+                        f"### 📋 Synchronization Inventory Scanned ({len(inv.items)} Models)\n"
+                        f"- **Synced to Supabase:** `{inv.synced_count}`\n"
+                        f"- **Local Only (Cached):** `{inv.local_only_count}`\n"
+                        f"- **Remote Assets Missing:** `{inv.remote_missing_count}`\n"
+                        f"- **Source Available (Not Cached):** `{inv.source_available_count}`\n"
+                        f"- **Licence Restricted:** `{inv.licence_blocked_count}`\n"
+                        f"- **Execution Ready (Real Simulation):** `{inv.execution_ready_count}`\n"
+                    )
+                    return summary, rows
+
+                def on_preview_bulk_sync():
+                    report = robot_catalog.sync_all_models(only_cached=True, dry_run=True)
+                    return report.summary_markdown()
+
+                def on_sync_all_eligible_models():
+                    report = robot_catalog.sync_all_models(only_cached=True, dry_run=False)
+                    inv = robot_catalog.get_sync_inventory(refresh_remote=True)
+                    rows = robot_catalog.format_sync_table_rows(inv)
+                    verif_rows = robot_catalog.format_verification_table_rows()
+                    return report.summary_markdown(), rows, verif_rows
+
+                def on_audit_cloud_assets():
+                    audit = robot_catalog.verify_cloud_assets()
+                    return audit.summary_markdown()
+
                 catalog_refresh_btn.click(
                     fn=refresh_catalog,
                     inputs=[catalog_search, catalog_family, model_to_prepare],
@@ -1218,6 +1276,26 @@ def create_ui() -> gr.Blocks:
                     fn=on_verify_all_runtimes,
                     inputs=[],
                     outputs=[model_prepare_result, verification_matrix_table],
+                )
+                scan_inventory_btn.click(
+                    fn=on_scan_sync_inventory,
+                    inputs=[],
+                    outputs=[bulk_sync_status_md, sync_inventory_table],
+                )
+                preview_sync_btn.click(
+                    fn=on_preview_bulk_sync,
+                    inputs=[],
+                    outputs=[bulk_sync_status_md],
+                )
+                sync_all_models_btn.click(
+                    fn=on_sync_all_eligible_models,
+                    inputs=[],
+                    outputs=[bulk_sync_status_md, sync_inventory_table, verification_matrix_table],
+                )
+                verify_cloud_assets_btn.click(
+                    fn=on_audit_cloud_assets,
+                    inputs=[],
+                    outputs=[bulk_sync_status_md],
                 )
 
             with gr.Tab("🔍 Diagnostic Copilot (Read-Only Inspection)"):

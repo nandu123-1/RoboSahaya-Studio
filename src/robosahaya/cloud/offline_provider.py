@@ -141,7 +141,7 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
             )
             self._versions[m.id] = [v_record]
 
-    def list_models(self, family: str = "All", search: str = "") -> List[CloudModelRecord]:
+    def list_models(self, family: str = "All", search: str = "", limit: Optional[int] = None, offset: int = 0) -> List[CloudModelRecord]:
         result = []
         q = (search or "").lower().strip()
         for m in self._models.values():
@@ -152,7 +152,12 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
                 if q not in searchable:
                     continue
             result.append(m)
-        return sorted(result, key=lambda x: x.display_name)
+        sorted_res = sorted(result, key=lambda x: x.display_name)
+        if offset:
+            sorted_res = sorted_res[offset:]
+        if limit is not None:
+            sorted_res = sorted_res[:limit]
+        return sorted_res
 
     def get_model(self, model_id: str) -> Optional[CloudModelRecord]:
         if not model_id:
@@ -200,6 +205,11 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
                 assets[idx] = asset
                 return True
         assets.append(asset)
+        return True
+
+    def delete_assets(self, version_id: str) -> bool:
+        if version_id in self._assets:
+            del self._assets[version_id]
         return True
 
     def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:

@@ -14,16 +14,24 @@ from typing import Any, Dict, List, Optional
 
 class CloudSyncStatus(str, Enum):
     LOCAL_ONLY = "local_only"
-    CLOUD_AVAILABLE = "cloud_available"
-    PENDING_UPLOAD = "pending_upload"
-    UPLOADING = "uploading"
+    SOURCE_AVAILABLE = "source_available"
+    REMOTE_ASSET_MISSING = "remote_asset_missing"
+    PENDING_SYNC = "pending_sync"
+    SYNCING = "syncing"
     SYNCED = "synced"
     SYNC_FAILED = "sync_failed"
+    LICENCE_BLOCKED = "licence_blocked"
+    SOURCE_UNAVAILABLE = "source_unavailable"
     VERSION_CONFLICT = "version_conflict"
-    REMOTE_ASSET_MISSING = "remote_asset_missing"
-    LOCAL_CACHE_MISSING = "local_cache_missing"
+    INTEGRITY_FAILED = "integrity_failed"
     OFFLINE = "offline"
     UNKNOWN = "unknown"
+
+    # Backward compatibility aliases
+    CLOUD_AVAILABLE = "source_available"
+    PENDING_UPLOAD = "pending_sync"
+    UPLOADING = "syncing"
+    LOCAL_CACHE_MISSING = "source_available"
 
 
 @dataclass
@@ -138,8 +146,8 @@ class BaseCatalogueProvider(ABC):
         ...
 
     @abstractmethod
-    def list_models(self, family: str = "All", search: str = "") -> List[CloudModelRecord]:
-        """List available models with optional search and family filter."""
+    def list_models(self, family: str = "All", search: str = "", limit: Optional[int] = None, offset: int = 0) -> List[CloudModelRecord]:
+        """List available models with optional search, family filter, and pagination."""
         ...
 
     @abstractmethod
@@ -171,6 +179,10 @@ class BaseCatalogueProvider(ABC):
     def upsert_asset(self, asset: CloudAssetRecord) -> bool:
         """Persist or update a model asset record."""
         ...
+
+    def delete_assets(self, version_id: str) -> bool:
+        """Delete registered asset metadata records for a model version."""
+        return True
 
     @abstractmethod
     def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class SupabaseCatalogueProvider(BaseCatalogueProvider):
     """PostgREST client communicating with Supabase database."""
 
-    def __init__(self, base_url: str, service_key: str, timeout: float = 10.0):
+    def __init__(self, base_url: str, service_key: str, timeout: float = 30.0):
         self.base_url = (base_url or "").rstrip("/")
         self.service_key = service_key or ""
         self.timeout = timeout
@@ -60,38 +60,59 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
         except Exception:
             return False
 
-    def list_models(self, family: str = "All", search: str = "") -> List[CloudModelRecord]:
+    def list_models(
+        self,
+        family: str = "All",
+        search: str = "",
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> List[CloudModelRecord]:
         if not self._rest_url or not self.service_key:
             return []
         try:
-            params: Dict[str, str] = {"select": "*", "order": "display_name.asc"}
-            if family and family != "All":
-                params["family"] = f"eq.{family}"
-            if search:
-                clean_s = search.strip().replace("'", "")
-                params["or"] = f"(id.ilike.%{clean_s}%,display_name.ilike.%{clean_s}%)"
-
+            records: List[CloudModelRecord] = []
+            cur_offset = offset
+            page_size = limit if limit is not None else 100
             client = self._get_client()
-            res = client.get(f"{self._rest_url}/robot_models", headers=self._headers(), params=params)
-            if res.status_code != 200:
-                logger.warning("Supabase list_models query returned status %d", res.status_code)
-                return []
-            data = res.json()
-            records = []
-            for row in data:
-                records.append(CloudModelRecord(
-                    id=row["id"],
-                    display_name=row["display_name"],
-                    family=row["family"],
-                    description=row.get("description", ""),
-                    manufacturer=row.get("manufacturer", "Unknown"),
-                    aliases=row.get("aliases") or [],
-                    default_version=row.get("default_model_version", "v1.0.0"),
-                    catalogue_status=row.get("catalogue_status", "catalogued"),
-                    licence=row.get("licence_identifier", "Check upstream source"),
-                    licence_url=row.get("licence_url", ""),
-                    metadata=row.get("metadata_json") or {},
-                ))
+
+            while True:
+                params: Dict[str, str] = {
+                    "select": "*",
+                    "order": "display_name.asc",
+                    "limit": str(page_size),
+                    "offset": str(cur_offset),
+                }
+                if family and family != "All":
+                    params["family"] = f"eq.{family}"
+                if search:
+                    clean_s = search.strip().replace("'", "")
+                    params["or"] = f"(id.ilike.%{clean_s}%,display_name.ilike.%{clean_s}%)"
+
+                res = client.get(f"{self._rest_url}/robot_models", headers=self._headers(), params=params)
+                if res.status_code != 200:
+                    logger.warning("Supabase list_models query returned status %d", res.status_code)
+                    break
+                data = res.json()
+                if not data:
+                    break
+                for row in data:
+                    records.append(CloudModelRecord(
+                        id=row["id"],
+                        display_name=row["display_name"],
+                        family=row["family"],
+                        description=row.get("description", ""),
+                        manufacturer=row.get("manufacturer", "Unknown"),
+                        aliases=row.get("aliases") or [],
+                        default_version=row.get("default_model_version", "v1.0.0"),
+                        catalogue_status=row.get("catalogue_status", "catalogued"),
+                        licence=row.get("licence_identifier", "Check upstream source"),
+                        licence_url=row.get("licence_url", ""),
+                        metadata=row.get("metadata_json") or {},
+                    ))
+                if limit is not None or len(data) < page_size:
+                    break
+                cur_offset += page_size
+
             return records
         except Exception as e:
             logger.warning("Error querying Supabase models: %s", str(e))
@@ -268,6 +289,21 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             logger.warning("Error upserting asset '%s' to Supabase: %s", asset.id, str(e))
             return False
 
+    def delete_assets(self, version_id: str) -> bool:
+        if not self._rest_url or not self.service_key or not version_id:
+            return False
+        try:
+            client = self._get_client()
+            res = client.delete(
+                f"{self._rest_url}/robot_model_assets",
+                headers=self._headers(),
+                params={"robot_model_version_id": f"eq.{version_id}"}
+            )
+            return res.status_code in (200, 204)
+        except Exception as e:
+            logger.warning("Error deleting assets for version '%s': %s", version_id, str(e))
+            return False
+
     def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:
         if not self._rest_url or not self.service_key:
             return False
@@ -333,6 +369,16 @@ class SupabaseStorageProvider(BaseStorageProvider):
         self.bucket = bucket_name or "robot-model-packages"
         self.timeout = timeout
         self._storage_url = f"{self.base_url}/storage/v1" if self.base_url else ""
+        self._client: Optional[httpx.Client] = None
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
+
+    def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            self._client.close()
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -344,9 +390,9 @@ class SupabaseStorageProvider(BaseStorageProvider):
         if not self._storage_url or not self.service_key:
             return False
         try:
-            with httpx.Client(timeout=3.0) as client:
-                res = client.get(f"{self._storage_url}/bucket/{self.bucket}", headers=self._headers())
-                return res.status_code in (200, 404)  # 404 means server reachable but bucket not yet created
+            client = self._get_client()
+            res = client.get(f"{self._storage_url}/bucket/{self.bucket}", headers=self._headers())
+            return res.status_code in (200, 404)  # 404 means server reachable but bucket not yet created
         except Exception:
             return False
 
@@ -355,12 +401,29 @@ class SupabaseStorageProvider(BaseStorageProvider):
             return {"exists": False, "size": 0, "sha256": None}
         try:
             clean_key = object_key.lstrip("/")
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.head(f"{self._storage_url}/object/authenticated/{self.bucket}/{clean_key}", headers=self._headers())
-                if res.status_code == 200:
-                    size = int(res.headers.get("content-length", 0))
-                    etag = res.headers.get("etag", "").strip('"')
-                    return {"exists": True, "size": size, "sha256": etag}
+            client = self._get_client()
+            headers = self._headers()
+            headers["Accept-Encoding"] = "identity"
+            res = client.head(f"{self._storage_url}/object/authenticated/{self.bucket}/{clean_key}", headers=headers)
+            if res.status_code == 200:
+                size = int(res.headers.get("content-length", 0))
+                etag = res.headers.get("etag", "").strip('"')
+                if size == 0:
+                    # Fallback for gateways suppressing content-length on head
+                    folder = "/".join(clean_key.split("/")[:-1])
+                    fname = clean_key.split("/")[-1]
+                    list_res = client.post(
+                        f"{self._storage_url}/object/list/{self.bucket}",
+                        headers=self._headers(),
+                        json={"prefix": folder, "search": fname, "limit": 5}
+                    )
+                    if list_res.status_code == 200:
+                        for item in list_res.json():
+                            if item.get("name") == fname and "metadata" in item:
+                                size = int(item["metadata"].get("size", size))
+                                etag = item["metadata"].get("eTag", etag).strip('"')
+                                break
+                return {"exists": True, "size": size, "sha256": etag}
         except Exception as e:
             logger.debug("check_object failed for %s: %s", object_key, str(e))
         return {"exists": False, "size": 0, "sha256": None}
@@ -370,16 +433,16 @@ class SupabaseStorageProvider(BaseStorageProvider):
             return None
         try:
             clean_key = object_key.lstrip("/")
-            with httpx.Client(timeout=self.timeout) as client:
-                res = client.post(
-                    f"{self._storage_url}/object/sign/{self.bucket}/{clean_key}",
-                    headers=self._headers(),
-                    json={"expiresIn": expires_in}
-                )
-                if res.status_code == 200:
-                    signed_url = res.json().get("signedURL")
-                    if signed_url:
-                        return f"{self.base_url}/storage/v1{signed_url}"
+            client = self._get_client()
+            res = client.post(
+                f"{self._storage_url}/object/sign/{self.bucket}/{clean_key}",
+                headers=self._headers(),
+                json={"expiresIn": expires_in}
+            )
+            if res.status_code == 200:
+                signed_url = res.json().get("signedURL")
+                if signed_url:
+                    return f"{self.base_url}/storage/v1{signed_url}"
         except Exception as e:
             logger.warning("Failed to sign download URL for '%s': %s", object_key, str(e))
         return None
@@ -392,21 +455,21 @@ class SupabaseStorageProvider(BaseStorageProvider):
         temp_dest = destination.with_suffix(f"{destination.suffix}.part")
 
         import time
+        client = self._get_client()
         for attempt in range(max_retries):
             try:
-                with httpx.Client(timeout=self.timeout) as client:
-                    with client.stream("GET", f"{self._storage_url}/object/authenticated/{self.bucket}/{clean_key}", headers=self._headers()) as res:
-                        if res.status_code == 200:
-                            with open(temp_dest, "wb") as f:
-                                for chunk in res.iter_bytes(chunk_size=65536):
-                                    f.write(chunk)
-                            temp_dest.replace(destination)
-                            return True
-                        elif res.status_code == 404:
-                            logger.warning("Supabase storage object not found (404): %s", clean_key)
-                            return False
-                        else:
-                            logger.warning("Supabase download returned status %d on attempt %d", res.status_code, attempt + 1)
+                with client.stream("GET", f"{self._storage_url}/object/authenticated/{self.bucket}/{clean_key}", headers=self._headers()) as res:
+                    if res.status_code == 200:
+                        with open(temp_dest, "wb") as f:
+                            for chunk in res.iter_bytes(chunk_size=65536):
+                                f.write(chunk)
+                        temp_dest.replace(destination)
+                        return True
+                    elif res.status_code == 404:
+                        logger.warning("Supabase storage object not found (404): %s", clean_key)
+                        return False
+                    else:
+                        logger.warning("Supabase download returned status %d on attempt %d", res.status_code, attempt + 1)
             except Exception as e:
                 logger.warning("Error downloading package '%s' (attempt %d/%d): %s", object_key, attempt + 1, max_retries, str(e))
                 time.sleep(0.5 * (attempt + 1))
@@ -423,14 +486,15 @@ class SupabaseStorageProvider(BaseStorageProvider):
             clean_key = object_key.lstrip("/")
             headers = self._headers()
             headers["Content-Type"] = "application/octet-stream"
+            headers["x-upsert"] = "true"
+            client = self._get_client()
             with open(file_path, "rb") as f:
-                with httpx.Client(timeout=self.timeout * 2) as client:
-                    res = client.post(
-                        f"{self._storage_url}/object/{self.bucket}/{clean_key}",
-                        headers=headers,
-                        content=f.read()
-                    )
-                    return res.status_code in (200, 201)
+                res = client.post(
+                    f"{self._storage_url}/object/{self.bucket}/{clean_key}",
+                    headers=headers,
+                    content=f.read()
+                )
+                return res.status_code in (200, 201)
         except Exception as e:
             logger.warning("Error uploading package '%s': %s", object_key, str(e))
             return False

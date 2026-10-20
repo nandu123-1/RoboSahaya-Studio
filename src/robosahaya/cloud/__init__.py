@@ -13,6 +13,15 @@ from .base import (
 from .client import get_cloud_catalogue, get_cloud_status, get_cloud_storage, reset_cloud_clients
 from .offline_provider import OfflineCatalogueProvider, OfflineStorageProvider
 from .supabase_provider import SupabaseCatalogueProvider, SupabaseStorageProvider
+from .sync_service import (
+    AuditReport,
+    BatchSyncReport,
+    CatalogueInventory,
+    RobotCatalogueSyncService,
+    RobotSyncInventoryItem,
+    SyncResult,
+    get_sync_service,
+)
 
 __all__ = [
     "BaseCatalogueProvider",
@@ -32,4 +41,11 @@ __all__ = [
     "OfflineStorageProvider",
     "SupabaseCatalogueProvider",
     "SupabaseStorageProvider",
+    "RobotCatalogueSyncService",
+    "get_sync_service",
+    "CatalogueInventory",
+    "RobotSyncInventoryItem",
+    "BatchSyncReport",
+    "AuditReport",
+    "SyncResult",
 ]
