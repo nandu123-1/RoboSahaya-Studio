@@ -16,6 +16,7 @@ from .base import (
     CloudAssetRecord,
     CloudModelRecord,
     CloudVersionRecord,
+    RuntimeCompatibilityRecord,
     VerificationRunRecord,
 )
 
@@ -29,6 +30,7 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
         self._models: Dict[str, CloudModelRecord] = {}
         self._versions: Dict[str, List[CloudVersionRecord]] = {}
         self._assets: Dict[str, List[CloudAssetRecord]] = {}
+        self._compatibilities: Dict[str, RuntimeCompatibilityRecord] = {}
         self._verification_runs: List[VerificationRunRecord] = []
 
         if seeded_models:
@@ -164,6 +166,10 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
                 return m
         return None
 
+    def upsert_model(self, model: CloudModelRecord) -> bool:
+        self._models[model.id] = model
+        return True
+
     def get_version(self, model_id: str, version: str = "latest") -> Optional[CloudVersionRecord]:
         versions = self._versions.get(model_id, [])
         if not versions:
@@ -175,8 +181,21 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
                 return v
         return None
 
+    def upsert_version(self, version: CloudVersionRecord) -> bool:
+        versions = self._versions.setdefault(version.robot_model_id, [])
+        for idx, v in enumerate(versions):
+            if v.version == version.version:
+                versions[idx] = version
+                return True
+        versions.append(version)
+        return True
+
     def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
         return self._assets.get(version_id, [])
+
+    def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:
+        self._compatibilities[compat.id] = compat
+        return True
 
     def record_verification_run(self, run: VerificationRunRecord) -> bool:
         self._verification_runs.append(run)

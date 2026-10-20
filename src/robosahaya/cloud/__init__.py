@@ -5,6 +5,7 @@ from .base import (
     CloudAssetRecord,
     CloudModelRecord,
     CloudVersionRecord,
+    RuntimeCompatibilityRecord,
     VerificationRunRecord,
 )
 from .client import get_cloud_catalogue, get_cloud_status, get_cloud_storage, reset_cloud_clients
@@ -17,6 +18,7 @@ __all__ = [
     "CloudAssetRecord",
     "CloudModelRecord",
     "CloudVersionRecord",
+    "RuntimeCompatibilityRecord",
     "VerificationRunRecord",
     "get_cloud_catalogue",
     "get_cloud_storage",

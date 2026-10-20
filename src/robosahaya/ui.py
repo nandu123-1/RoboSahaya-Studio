@@ -1056,9 +1056,26 @@ def create_ui() -> gr.Blocks:
                     prepare_model_btn = gr.Button("📥 Prepare / Cache Description", variant="primary", scale=1)
                     verify_integrity_btn = gr.Button("🛡️ Verify Integrity", variant="secondary", scale=1)
                     inspect_readiness_btn = gr.Button("📊 9D Readiness Profile", variant="secondary", scale=1)
+
+                with gr.Row():
+                    verify_runtime_btn = gr.Button("⚡ Verify Selected Runtime", variant="secondary", scale=1)
+                    verify_all_runtimes_btn = gr.Button("🚀 Verify All Model Runtimes & Cloud Sync", variant="primary", scale=2)
+
                 model_prepare_result = gr.Markdown(
                     "*Choose a model and click Prepare / Cache Description. Runtime readiness will not be inferred from download success.*"
                 )
+
+                with gr.Accordion("📋 Authoritative Multi-Robot Runtime Matrix", open=True):
+                    verification_matrix_table = gr.Dataframe(
+                        headers=["Robot", "Family", "Target Simulator", "9D Verdict", "Execution Status", "Cloud Synced", "Blockers / Evidence"],
+                        datatype=["str", "str", "str", "str", "str", "str", "str"],
+                        interactive=False,
+                        wrap=True,
+                        value=robot_catalog.format_verification_table_rows(),
+                        label="Verified Robot Model Runtimes (Supabase Synchronized)",
+                        row_count=(8, "dynamic"),
+                        col_count=(7, "fixed"),
+                    )
 
                 def refresh_catalog(search_text="", family="All", selected=None):
                     models = robot_catalog.list_models(search=search_text or "", family=family or "All")
@@ -1122,6 +1139,36 @@ def create_ui() -> gr.Blocks:
 {blockers_md}
 """
 
+                def on_verify_single_runtime(model_id):
+                    if not model_id:
+                        return "### ⚠️ No robot model selected.", robot_catalog.format_verification_table_rows()
+                    rep = robot_catalog.verify_runtime(model_id, sync_to_cloud=True)
+                    blockers_md = "\n".join(f"- 🔴 {b}" for b in rep.decision.blockers) if rep.decision.blockers else "*(None — all required dimensions verified)*"
+                    checks_summary = "\n".join(f"- {'✅' if c.status == 'PASSED' else '⚠️' if c.status == 'SKIPPED' else '🔴'} **{c.name}**: `{c.status}` — {c.observed or c.error_message or ''}" for c in rep.decision.evidence_checks)
+                    cloud_note = "✅ Synchronized to Supabase Postgres (tables: robot_models, robot_model_versions, robot_runtime_compatibility, robot_verification_runs)" if rep.cloud_synced else "🟡 Local verification only (offline / uncommitted)"
+                    markdown_out = f"""### ⚡ Runtime Verification Result: `{rep.display_name}`
+**Target Simulator:** `{rep.simulator}` | **Execution Verdict:** `{rep.decision.summary_label}` | **Cloud State:** {cloud_note}
+
+#### 🔬 Evidence Checks
+{checks_summary}
+
+#### 🛑 Blockers & Constraints
+{blockers_md}
+"""
+                    return markdown_out, robot_catalog.format_verification_table_rows()
+
+                def on_verify_all_runtimes():
+                    reports = robot_catalog.verify_all_runtimes(sync_to_cloud=True)
+                    ready_count = sum(r.decision.is_ready for r in reports)
+                    synced_count = sum(r.cloud_synced for r in reports)
+                    rows = robot_catalog.format_verification_table_rows(reports)
+                    summary_md = f"""### 🚀 Verified All {len(reports)} Robot Model Runtimes
+- **Execution Ready:** `{ready_count} / {len(reports)}` models verified for real simulation & control.
+- **Blocked / Gated:** `{len(reports) - ready_count} / {len(reports)}` models accurately gated with honest blockers.
+- **Supabase Cloud Sync:** `{synced_count} / {len(reports)}` records synchronized with SHA-256 evidence.
+"""
+                    return summary_md, rows
+
                 catalog_refresh_btn.click(
                     fn=refresh_catalog,
                     inputs=[catalog_search, catalog_family, model_to_prepare],
@@ -1151,6 +1198,16 @@ def create_ui() -> gr.Blocks:
                     fn=on_inspect_readiness,
                     inputs=[model_to_prepare],
                     outputs=[model_prepare_result],
+                )
+                verify_runtime_btn.click(
+                    fn=on_verify_single_runtime,
+                    inputs=[model_to_prepare],
+                    outputs=[model_prepare_result, verification_matrix_table],
+                )
+                verify_all_runtimes_btn.click(
+                    fn=on_verify_all_runtimes,
+                    inputs=[],
+                    outputs=[model_prepare_result, verification_matrix_table],
                 )
 
             with gr.Tab("🔍 Diagnostic Copilot (Read-Only Inspection)"):

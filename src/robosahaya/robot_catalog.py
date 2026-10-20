@@ -479,3 +479,32 @@ class RobotModelCatalog:
 
     def prepare_model_package(self, model_id: str, version: str = "v1.0.0") -> dict[str, Any]:
         return self.model_cache.prepare_model(model_id, version)
+
+    def verify_runtime(self, model_id: str, simulator: Optional[str] = None, sync_to_cloud: bool = True) -> Any:
+        from .cloud.verify_runtimes import get_runtime_verifier
+        verifier = get_runtime_verifier()
+        return verifier.verify_robot(model_id, simulator=simulator, sync_to_cloud=sync_to_cloud)
+
+    def verify_all_runtimes(self, sync_to_cloud: bool = True) -> list[Any]:
+        from .cloud.verify_runtimes import get_runtime_verifier
+        verifier = get_runtime_verifier()
+        return verifier.verify_all_robots(sync_to_cloud=sync_to_cloud)
+
+    def format_verification_table_rows(self, reports: Optional[list[Any]] = None) -> list[list[str]]:
+        if reports is None:
+            reports = self.verify_all_runtimes(sync_to_cloud=False)
+        rows = []
+        for r in reports:
+            status = "Ready" if r.decision.is_ready else "Blocked"
+            synced = "✅ Synced" if r.cloud_synced else "Local only"
+            blocker_note = "; ".join(r.decision.blockers[:2]) if r.decision.blockers else "All 9 dimensions verified"
+            rows.append([
+                r.display_name,
+                r.family,
+                r.simulator,
+                r.decision.summary_label,
+                status,
+                synced,
+                blocker_note,
+            ])
+        return rows

@@ -55,6 +55,22 @@ class CloudAssetRecord:
 
 
 @dataclass
+class RuntimeCompatibilityRecord:
+    id: str
+    robot_model_version_id: str
+    adapter_id: str
+    compatibility_status: str
+    simulator_version: str = ""
+    required_plugins: List[str] = field(default_factory=list)
+    required_controllers: List[str] = field(default_factory=list)
+    required_sensors: List[str] = field(default_factory=list)
+    required_bridges: List[str] = field(default_factory=list)
+    known_limitations: str = ""
+    last_validation_id: Optional[str] = None
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+@dataclass
 class VerificationRunRecord:
     id: str
     robot_model_version_id: str
@@ -67,6 +83,7 @@ class VerificationRunRecord:
     report_fingerprint: str
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: Optional[str] = None
+    test_profile: Dict[str, Any] = field(default_factory=dict)
 
 
 class BaseCatalogueProvider(ABC):
@@ -88,13 +105,28 @@ class BaseCatalogueProvider(ABC):
         ...
 
     @abstractmethod
+    def upsert_model(self, model: CloudModelRecord) -> bool:
+        """Persist or update a model record."""
+        ...
+
+    @abstractmethod
     def get_version(self, model_id: str, version: str = "latest") -> Optional[CloudVersionRecord]:
         """Get a specific version record for a robot model."""
         ...
 
     @abstractmethod
+    def upsert_version(self, version: CloudVersionRecord) -> bool:
+        """Persist or update a model version record."""
+        ...
+
+    @abstractmethod
     def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
         """List all asset records belonging to a model version."""
+        ...
+
+    @abstractmethod
+    def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:
+        """Persist or update a simulator compatibility record."""
         ...
 
     @abstractmethod

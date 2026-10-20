@@ -16,6 +16,7 @@ from .base import (
     CloudAssetRecord,
     CloudModelRecord,
     CloudVersionRecord,
+    RuntimeCompatibilityRecord,
     VerificationRunRecord,
 )
 
@@ -117,6 +118,34 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             logger.warning("Error fetching model '%s' from Supabase: %s", model_id, str(e))
         return None
 
+    def upsert_model(self, model: CloudModelRecord) -> bool:
+        if not self._rest_url or not self.service_key:
+            return False
+        try:
+            from datetime import datetime, timezone
+            payload = {
+                "id": model.id,
+                "display_name": model.display_name,
+                "family": model.family,
+                "description": model.description,
+                "manufacturer": model.manufacturer,
+                "aliases": model.aliases,
+                "default_model_version": model.default_version,
+                "catalogue_status": model.catalogue_status,
+                "licence_identifier": model.licence,
+                "licence_url": model.licence_url,
+                "metadata_json": model.metadata,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            headers = self._headers()
+            headers["Prefer"] = "resolution=merge-duplicates"
+            with httpx.Client(timeout=self.timeout) as client:
+                res = client.post(f"{self._rest_url}/robot_models", headers=headers, json=payload)
+                return res.status_code in (200, 201)
+        except Exception as e:
+            logger.warning("Error upserting model '%s' to Supabase: %s", model.id, str(e))
+            return False
+
     def get_version(self, model_id: str, version: str = "latest") -> Optional[CloudVersionRecord]:
         if not self._rest_url or not self.service_key:
             return None
@@ -150,6 +179,32 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             logger.warning("Error fetching version for '%s': %s", model_id, str(e))
         return None
 
+    def upsert_version(self, version: CloudVersionRecord) -> bool:
+        if not self._rest_url or not self.service_key:
+            return False
+        try:
+            payload = {
+                "id": version.id,
+                "robot_model_id": version.robot_model_id,
+                "version": version.version,
+                "source_type": version.source_type,
+                "source_repository": version.source_repository,
+                "source_revision": version.source_revision,
+                "description_format": version.description_format,
+                "entrypoint_path": version.entrypoint_path,
+                "manifest_path": version.manifest_path,
+                "content_fingerprint": version.content_fingerprint,
+                "validation_metadata": version.validation_metadata,
+            }
+            headers = self._headers()
+            headers["Prefer"] = "resolution=merge-duplicates"
+            with httpx.Client(timeout=self.timeout) as client:
+                res = client.post(f"{self._rest_url}/robot_model_versions", headers=headers, json=payload)
+                return res.status_code in (200, 201)
+        except Exception as e:
+            logger.warning("Error upserting version '%s' to Supabase: %s", version.id, str(e))
+            return False
+
     def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
         if not self._rest_url or not self.service_key or not version_id:
             return []
@@ -179,6 +234,34 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             logger.warning("Error fetching assets for version '%s': %s", version_id, str(e))
         return []
 
+    def upsert_compatibility(self, compat: RuntimeCompatibilityRecord) -> bool:
+        if not self._rest_url or not self.service_key:
+            return False
+        try:
+            from datetime import datetime, timezone
+            payload = {
+                "id": compat.id,
+                "robot_model_version_id": compat.robot_model_version_id,
+                "adapter_id": compat.adapter_id,
+                "simulator_version": compat.simulator_version,
+                "compatibility_status": compat.compatibility_status,
+                "required_plugins": compat.required_plugins,
+                "required_controllers": compat.required_controllers,
+                "required_sensors": compat.required_sensors,
+                "required_bridges": compat.required_bridges,
+                "known_limitations": compat.known_limitations,
+                "last_validation_id": compat.last_validation_id,
+                "updated_at": compat.updated_at or datetime.now(timezone.utc).isoformat(),
+            }
+            headers = self._headers()
+            headers["Prefer"] = "resolution=merge-duplicates"
+            with httpx.Client(timeout=self.timeout) as client:
+                res = client.post(f"{self._rest_url}/robot_runtime_compatibility", headers=headers, json=payload)
+                return res.status_code in (200, 201)
+        except Exception as e:
+            logger.warning("Failed to upsert runtime compatibility for '%s': %s", compat.id, str(e))
+            return False
+
     def record_verification_run(self, run: VerificationRunRecord) -> bool:
         if not self._rest_url or not self.service_key:
             return False
@@ -189,6 +272,7 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
                 "adapter_id": run.adapter_id,
                 "world_id": run.world_id,
                 "test_suite_version": run.test_suite_version,
+                "test_profile": run.test_profile or {},
                 "environment_fingerprint": run.environment_fingerprint,
                 "overall_result": run.overall_result,
                 "check_results": run.check_results,
@@ -196,8 +280,10 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
                 "started_at": run.started_at,
                 "completed_at": run.completed_at,
             }
+            headers = self._headers()
+            headers["Prefer"] = "resolution=merge-duplicates"
             with httpx.Client(timeout=self.timeout) as client:
-                res = client.post(f"{self._rest_url}/robot_verification_runs", headers=self._headers(), json=payload)
+                res = client.post(f"{self._rest_url}/robot_verification_runs", headers=headers, json=payload)
                 return res.status_code in (200, 201)
         except Exception as e:
             logger.warning("Failed to record verification run to Supabase: %s", str(e))
