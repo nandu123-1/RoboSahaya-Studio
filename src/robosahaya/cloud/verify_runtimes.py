@@ -426,7 +426,7 @@ class RuntimeVerifier:
                     "skydio_x2": cache_base / "skydio_x2_description",
                 }
                 if robot_id in known_dirs and known_dirs[robot_id].exists():
-                    local_count = len([f for f in known_dirs[robot_id].rglob("*") if f.is_file()])
+                    local_count = len([f for f in known_dirs[robot_id].rglob("*") if f.is_file() and ".git" not in str(f)])
 
         # 2. Query cloud assets and version
         version_id = f"{robot_id}_{version}"
