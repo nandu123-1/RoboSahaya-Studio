@@ -68,7 +68,7 @@ class RobotCapabilityResolver:
                 supported=True,
                 prerequisites=["Multi-DOF kinematic chain", "Joint position or trajectory controller"],
                 required_controllers=["joint_trajectory_controller"],
-                supported_adapters=["gazebo_harmonic"],
+                supported_adapters=["gazebo_harmonic", "mujoco"],
                 control_interface="ros2_joint_trajectory",
                 verification_tests=["test_joint_states_payload"],
             )
@@ -79,7 +79,7 @@ class RobotCapabilityResolver:
                 supported=has_gripper,
                 prerequisites=["Finger link geometries", "Gripper prismatic/revolute actuator"],
                 required_controllers=["gripper_controller"] if has_gripper else [],
-                supported_adapters=["gazebo_harmonic"],
+                supported_adapters=["gazebo_harmonic", "mujoco"],
                 control_interface="ros2_gripper_action" if has_gripper else "",
                 verification_tests=["test_gripper_actuation"] if has_gripper else [],
                 limitation_reason=None if has_gripper else "Robot description does not configure an integrated gripper.",
@@ -169,11 +169,12 @@ class RobotCapabilityResolver:
 
         # 3. Drones / Aerial
         elif family == "drone/aerial":
+            has_flight_ctrl = any("flight_controller" in c or "px4" in c for c in getattr(model, "controllers", ()))
             caps[CapabilityType.DRONE_FLIGHT] = RobotCapability(
                 capability_type=CapabilityType.DRONE_FLIGHT,
-                supported=False,
+                supported=has_flight_ctrl,
                 prerequisites=["Rotor dynamics plugin", "PX4 / SITL flight controller interface"],
-                limitation_reason="Drone flight controller and SITL bridge are not integrated in this studio installation. Blocked.",
+                limitation_reason=None if has_flight_ctrl else "Drone flight controller and SITL bridge are not integrated in this studio installation. Blocked.",
             )
             caps[CapabilityType.MANIPULATION_ARM] = RobotCapability(
                 capability_type=CapabilityType.MANIPULATION_ARM,
@@ -193,11 +194,12 @@ class RobotCapabilityResolver:
 
         # 4. Quadrupeds and Humanoids
         elif family in ("quadruped", "humanoid/biped"):
+            is_supported_legged = model.id in ("unitree_go1", "go1")
             caps[CapabilityType.LEGGED_LOCOMOTION] = RobotCapability(
                 capability_type=CapabilityType.LEGGED_LOCOMOTION,
-                supported=False,
+                supported=is_supported_legged,
                 prerequisites=["WBC / MPC locomotion controller", "Ground contact sensors"],
-                limitation_reason=f"Legged gait controller for '{model.display_name}' is not integrated in this studio runtime. Blocked.",
+                limitation_reason=None if is_supported_legged else f"Legged gait controller for '{model.display_name}' is not integrated in this studio runtime. Blocked.",
             )
             caps[CapabilityType.MANIPULATION_ARM] = RobotCapability(
                 capability_type=CapabilityType.MANIPULATION_ARM,

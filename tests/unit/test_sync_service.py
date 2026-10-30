@@ -249,6 +249,24 @@ def test_asset_audit_report(temp_workspace):
     assert len(audit2.missing_assets) > 0
 
 
+def test_asset_audit_detects_same_size_sha256_mismatch(temp_workspace):
+    offline_cat = OfflineCatalogueProvider()
+    storage = OfflineStorageProvider(root_dir=temp_workspace["storage_root"])
+    svc = RobotCatalogueSyncService(
+        catalogue_provider=offline_cat,
+        storage_provider=storage,
+        templates_root=temp_workspace["templates"],
+        cache_base=temp_workspace["cache"],
+    )
+    svc.sync_single_robot("so_arm100", dry_run=False)
+    target = temp_workspace["storage_root"] / "models/so_arm100/v1.0.0/so100.urdf"
+    if target.exists():
+        orig_bytes = target.read_bytes()
+        target.write_bytes(b"#" * len(orig_bytes))
+        audit = svc.verify_all_cloud_robot_assets()
+        assert audit.model_statuses.get("so_arm100_v1.0.0") == CloudSyncStatus.INTEGRITY_FAILED
+
+
 def test_catalog_table_integration():
     cat = RobotModelCatalog()
     inv = cat.get_sync_inventory(refresh_remote=False)
@@ -260,3 +278,72 @@ def test_catalog_table_integration():
     for r in rows:
         assert len(r) == 8  # 8 columns
         assert r[0] in inv.items
+
+
+def test_full_catalogue_coverage_inventory(temp_workspace):
+    """Verify that build_inventory covers all 175 catalogue models."""
+    offline_cat = OfflineCatalogueProvider()
+    storage = OfflineStorageProvider(root_dir=temp_workspace["storage_root"])
+    svc = RobotCatalogueSyncService(
+        catalogue_provider=offline_cat,
+        storage_provider=storage,
+        templates_root=temp_workspace["templates"],
+        cache_base=temp_workspace["cache"],
+    )
+
+    inv = svc.build_inventory()
+    # The full catalogue discovered through robot_descriptions contains 175 models
+    assert inv.total_models >= 170
+    assert len(inv.items) >= 170
+    assert "differential_drive" in inv.items
+    assert "unitree_go1" in inv.items
+    assert "so_arm100" in inv.items
+
+
+def test_asset_type_check_constraint_compliance(temp_workspace):
+    """Ensure all discovered assets strictly map to allowed PostgreSQL check constraints."""
+    allowed_types = {"mesh", "texture", "description", "config", "manifest", "script"}
+    offline_cat = OfflineCatalogueProvider()
+    storage = OfflineStorageProvider(root_dir=temp_workspace["storage_root"])
+    svc = RobotCatalogueSyncService(
+        catalogue_provider=offline_cat,
+        storage_provider=storage,
+        templates_root=temp_workspace["templates"],
+        cache_base=temp_workspace["cache"],
+    )
+
+    pkg_dir = temp_workspace["cache"] / "test_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "model.urdf").write_text("<robot></robot>")
+    (pkg_dir / "mesh.dae").write_text("<collada></collada>")
+    (pkg_dir / "tex.png").write_bytes(b"png")
+    (pkg_dir / "config.yaml").write_text("a: 1")
+    (pkg_dir / "run.launch").write_text("<launch></launch>")
+    (pkg_dir / "view.rviz").write_text("rviz config")
+    (pkg_dir / "manifest.json").write_text("{}")
+
+    assets = svc.discover_package_assets(pkg_dir, "test_pkg")
+    assert len(assets) == 7
+    for a in assets:
+        assert a.asset_type in allowed_types, f"Invalid asset_type '{a.asset_type}' for {a.relative_path}"
+
+
+def test_aggregate_accounting_reconciliation(temp_workspace):
+    """Test rigorous aggregate asset math and partial model reporting."""
+    offline_cat = OfflineCatalogueProvider()
+    storage = OfflineStorageProvider(root_dir=temp_workspace["storage_root"])
+    svc = RobotCatalogueSyncService(
+        catalogue_provider=offline_cat,
+        storage_provider=storage,
+        templates_root=temp_workspace["templates"],
+        cache_base=temp_workspace["cache"],
+    )
+
+    report = svc.sync_all_robot_models(only_cached=True, dry_run=False)
+    assert report.total_considered >= 170
+    assert report.assets_attempted >= report.assets_uploaded
+    assert report.assets_total_verified == report.assets_uploaded + report.assets_previously_verified
+    assert report.assets_remaining == report.assets_missing_remote + report.assets_failed_upload
+    md = report.summary_markdown()
+    assert "Bulk Synchronization Report" in md
+    assert "Aggregate Asset Accounting" in md

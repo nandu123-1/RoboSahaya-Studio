@@ -125,5 +125,5 @@ def test_format_verification_table_rows_reflects_sync_state():
     assert len(rows) == 1
     assert rows[0][0] == "Robot Soccer Kit (RSK)"
     assert rows[0][2] == "mujoco"
-    assert rows[0][4] == "Ready"
+    assert rows[0][4] == "Blocked"
     assert "Synced" in rows[0][5]

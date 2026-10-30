@@ -175,6 +175,14 @@ class BaseCatalogueProvider(ABC):
         """List all asset records belonging to a model version."""
         ...
 
+    def list_all_versions(self) -> List[CloudVersionRecord]:
+        """List all version records currently in the catalogue."""
+        return []
+
+    def get_asset_counts(self) -> Dict[str, int]:
+        """Return mapping of version_id -> registered asset count."""
+        return {}
+
     @abstractmethod
     def upsert_asset(self, asset: CloudAssetRecord) -> bool:
         """Persist or update a model asset record."""

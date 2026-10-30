@@ -198,6 +198,15 @@ class OfflineCatalogueProvider(BaseCatalogueProvider):
     def list_assets(self, version_id: str) -> List[CloudAssetRecord]:
         return self._assets.get(version_id, [])
 
+    def list_all_versions(self) -> List[CloudVersionRecord]:
+        res = []
+        for v_list in self._versions.values():
+            res.extend(v_list)
+        return res
+
+    def get_asset_counts(self) -> Dict[str, int]:
+        return {vid: len(assets) for vid, assets in self._assets.items()}
+
     def upsert_asset(self, asset: CloudAssetRecord) -> bool:
         assets = self._assets.setdefault(asset.version_id, [])
         for idx, a in enumerate(assets):
@@ -238,8 +247,8 @@ class OfflineStorageProvider(BaseStorageProvider):
             with open(target, "rb") as f:
                 while chunk := f.read(65536):
                     hasher.update(chunk)
-            return {"exists": True, "size": target.stat().st_size, "sha256": hasher.hexdigest()}
-        return {"exists": False, "size": 0, "sha256": None}
+            return {"exists": True, "size": target.stat().st_size, "sha256": hasher.hexdigest(), "content_encoding": ""}
+        return {"exists": False, "size": 0, "sha256": None, "content_encoding": ""}
 
     def resolve_download_url(self, object_key: str, expires_in: int = 3600) -> Optional[str]:
         target = self.root_dir / object_key.lstrip("/")

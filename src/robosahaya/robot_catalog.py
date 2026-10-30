@@ -485,22 +485,76 @@ class RobotModelCatalog:
         verifier = get_runtime_verifier()
         return verifier.verify_robot(model_id, simulator=simulator, sync_to_cloud=sync_to_cloud)
 
+    def verify_batch(
+        self,
+        robot_ids: Optional[list[str]] = None,
+        batch_size: int = 10,
+        offset: int = 0,
+        sync_to_cloud: bool = True,
+        progress_cb: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        from .cloud.verify_runtimes import get_runtime_verifier
+        verifier = get_runtime_verifier()
+        return verifier.verify_batch(
+            robot_ids=robot_ids,
+            batch_size=batch_size,
+            offset=offset,
+            sync_to_cloud=sync_to_cloud,
+            progress_callback=progress_cb,
+        )
+
     def verify_all_runtimes(self, sync_to_cloud: bool = True) -> list[Any]:
         from .cloud.verify_runtimes import get_runtime_verifier
         verifier = get_runtime_verifier()
         return verifier.verify_all_robots(sync_to_cloud=sync_to_cloud)
 
-    def format_verification_table_rows(self, reports: Optional[list[Any]] = None) -> list[list[str]]:
+    def format_verification_table_rows(
+        self,
+        reports: Optional[list[Any]] = None,
+        filter_state: Optional[str] = None,
+    ) -> list[list[str]]:
         if reports is None:
             reports = self.verify_all_runtimes(sync_to_cloud=False)
         rows = []
         for r in reports:
+            v_state = getattr(r, "verification_state", None)
+            v_state_val = v_state.value if hasattr(v_state, "value") else str(v_state or "not_checked")
+
+            # Apply state filtering if requested
+            if filter_state and filter_state != "All":
+                if filter_state == "Ready / Passed" and not r.decision.is_ready:
+                    continue
+                elif filter_state == "Blocked (Controller)" and "controller" not in v_state_val:
+                    continue
+                elif filter_state == "Blocked (Source / Cache)" and "source" not in v_state_val and "cache" not in v_state_val:
+                    continue
+                elif filter_state == "Blocked (Physics)" and "physics" not in v_state_val:
+                    continue
+                elif filter_state == "Not Checked" and v_state_val != "not_checked":
+                    continue
+
             status = "Ready" if r.decision.is_ready else "Blocked"
+
+            # Color-coded badge for 12-stage verdict
+            if r.decision.is_ready or v_state_val == "passed":
+                state_badge = "🟢 PASSED"
+            elif "physics" in v_state_val:
+                state_badge = "🔴 BLOCKED (PHYSICS)"
+            elif "controller" in v_state_val:
+                state_badge = "🟡 BLOCKED (CONTROLLER)"
+            elif "source" in v_state_val or "cache" in v_state_val:
+                state_badge = "🟠 BLOCKED (PACKAGE)"
+            elif "simulator" in v_state_val:
+                state_badge = "🟣 BLOCKED (SIMULATOR)"
+            else:
+                state_badge = f"🔴 {v_state_val.upper()}"
+
             if hasattr(r, "sync_state") and r.sync_state:
                 synced = r.sync_state.display_label
             else:
                 synced = "☁️ Synced" if r.cloud_synced else "💻 Local only"
-            blocker_note = "; ".join(r.decision.blockers[:2]) if r.decision.blockers else "All 9 dimensions verified"
+
+            blocker_note = "; ".join(r.decision.blockers[:2]) if r.decision.blockers else "All 12 stages verified"
             rows.append([
                 r.display_name,
                 r.family,
@@ -563,3 +617,24 @@ class RobotModelCatalog:
                 item.sync_notes or ("; ".join(item.blockers[:1]) if item.blockers else "Ready"),
             ])
         return rows
+
+    def format_execution_matrix_table_rows(
+        self,
+        filter_family: str = "All",
+        filter_readiness: str = "All",
+        filter_skill: str = "All",
+        filter_fidelity: str = "All",
+    ) -> list[list[str]]:
+        """Format the authoritative 175-model execution matrix for UI display."""
+        from robosahaya.execution_matrix import get_execution_matrix
+        return get_execution_matrix().format_matrix_table_rows(
+            filter_family=filter_family,
+            filter_readiness=filter_readiness,
+            filter_skill=filter_skill,
+            filter_fidelity=filter_fidelity,
+        )
+
+    def get_execution_matrix_summary(self) -> dict[str, Any]:
+        """Return summary statistics across the complete catalogue execution matrix."""
+        from robosahaya.execution_matrix import get_execution_matrix
+        return get_execution_matrix().get_summary_statistics()

@@ -5,16 +5,231 @@ actuator control verification, and GUI viewer launching.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from robosahaya.robot_registry import RobotModel
 from robosahaya.simulators.base import SimulatorAdapter
+from robosahaya.tasks.contracts import ActionResult
+
+logger = logging.getLogger(__name__)
+
+
+_MODEL_FIDELITY_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+
+def get_loaded_model_fidelity_diagnostics(model_path: Union[str, Path]) -> Dict[str, Any]:
+    """Retrieve recorded physical alterations and syntax repairs for a loaded model."""
+    key = str(Path(model_path).resolve())
+    return _MODEL_FIDELITY_REGISTRY.get(key, {
+        "fidelity_status": "faithful",
+        "syntax_normalizations": [],
+        "asset_repairs": [],
+        "synthetic_actuators": [],
+        "injected_damping": {},
+        "repaired_inertias": [],
+        "caveats": ["Model loaded without dynamic modifications."],
+    })
+
+
+def load_mujoco_model(model_path: Union[str, Path], auto_actuators: bool = False) -> Any:
+    """Load a MuJoCo model, sanitizing non-standard duplicate XML tags in URDFs if needed."""
+    import mujoco
+
+    path = Path(model_path)
+    syntax_fixes: List[str] = []
+    asset_repairs: List[str] = []
+    synthetic_acts: List[str] = []
+    injected_damp: Dict[str, float] = {}
+    repaired_inerts: List[str] = []
+    caveats: List[str] = []
+
+    # Ensure sibling asset/mesh directories in parent are accessible to subfolder XMLs
+    for asset_dir_name in ("assets", "meshes"):
+        parent_asset_dir = path.parent.parent / asset_dir_name
+        local_asset_link = path.parent / asset_dir_name
+        if parent_asset_dir.is_dir() and not local_asset_link.exists():
+            try:
+                local_asset_link.symlink_to(f"../{asset_dir_name}")
+                asset_repairs.append(f"Symlinked ../{asset_dir_name} into model directory")
+            except Exception:
+                pass
+
+    m = None
+    # For URDF models, preprocess to ensure package resolution, singular inertia repair, and joint damping
+    text = ""
+    if path.suffix.lower() == ".urdf":
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+
+    if "<robot" in text:
+        try:
+            root = ET.fromstring(text)
+            modified = False
+
+            # 1. Resolve package:// URIs dynamically
+            repo_root = Path.home() / ".cache" / "robot_descriptions" / "example-robot-data"
+            if repo_root.is_dir():
+                for el in root.iter():
+                    for attr in ("filename", "file"):
+                        val = el.get(attr)
+                        if val and ("package://example-robot-data" in val or "package:/example-robot-data" in val):
+                            el.set(attr, val.replace("package://example-robot-data", str(repo_root)).replace("package:/example-robot-data", str(repo_root)))
+                            syntax_fixes.append("Resolved package://example-robot-data URI to local filesystem")
+                            modified = True
+                        elif val and val.startswith("package://"):
+                            pkg_name = val.split("//")[1].split("/")[0]
+                            pkg_cand = Path.home() / ".cache" / "robot_descriptions" / pkg_name
+                            if pkg_cand.is_dir():
+                                el.set(attr, val.replace(f"package://{pkg_name}", str(pkg_cand)))
+                                syntax_fixes.append(f"Resolved package://{pkg_name} URI to local filesystem")
+                                modified = True
+
+            for link in root.findall("link"):
+                l_name = link.get("name", "unknown")
+                for visual in link.findall("visual"):
+                    mats = visual.findall("material")
+                    if len(mats) > 1:
+                        for extra in mats[1:]:
+                            visual.remove(extra)
+                        syntax_fixes.append(f"Removed {len(mats)-1} redundant visual material tags from link '{l_name}'")
+                        modified = True
+                    geoms = visual.findall("geometry")
+                    if len(geoms) > 1:
+                        for extra in geoms[1:]:
+                            visual.remove(extra)
+                        syntax_fixes.append(f"Removed {len(geoms)-1} redundant visual geometry tags from link '{l_name}'")
+                        modified = True
+                for collision in link.findall("collision"):
+                    geoms = collision.findall("geometry")
+                    if len(geoms) > 1:
+                        for extra in geoms[1:]:
+                            collision.remove(extra)
+                        syntax_fixes.append(f"Removed {len(geoms)-1} redundant collision geometry tags from link '{l_name}'")
+                        modified = True
+
+                # 2. Sanitize singular/zero dummy link inertias
+                iner = link.find("inertial/inertia")
+                if iner is not None:
+                    ixx = iner.get("ixx")
+                    ixy = iner.get("ixy")
+                    ixz = iner.get("ixz")
+                    if ixx and ixy == ixx and ixz == ixx:
+                        iner.set("ixy", "0")
+                        iner.set("ixz", "0")
+                        iner.set("iyz", "0")
+                        repaired_inerts.append(f"Zeroed non-diagonal inertia elements (ixy, ixz, iyz) on link '{l_name}'")
+                        modified = True
+
+            # 3. Ensure joint dynamics damping for lightweight arm stability
+            for j in root.findall("joint"):
+                j_name = j.get("name", "unknown")
+                if j.get("type") in ("revolute", "continuous", "prismatic"):
+                    dyn = j.find("dynamics")
+                    if dyn is None:
+                        dyn = ET.SubElement(j, "dynamics")
+                        dyn.set("damping", "0.1")
+                        injected_damp[j_name] = 0.1
+                        modified = True
+                    elif not dyn.get("damping"):
+                        dyn.set("damping", "0.1")
+                        injected_damp[j_name] = 0.1
+                        modified = True
+
+            if modified:
+                cleaned_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".urdf",
+                    dir=path.parent,
+                    encoding="utf-8",
+                    delete=False,
+                ) as tmp_f:
+                    tmp_f.write(cleaned_xml)
+                    tmp_path = Path(tmp_f.name)
+                try:
+                    m = mujoco.MjModel.from_xml_path(str(tmp_path))
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if m is None:
+        try:
+            m = mujoco.MjModel.from_xml_path(str(path))
+        except (ValueError, Exception) as initial_err:
+            raise initial_err
+
+    # Auto-generate position actuators for URDF models without actuator elements
+    if m is not None and auto_actuators and m.nu == 0 and m.njnt > 0:
+        tmp_f = tempfile.NamedTemporaryFile(mode="w", suffix=".xml", dir=path.parent, delete=False)
+        tmp_path = Path(tmp_f.name)
+        tmp_f.close()
+        try:
+            mujoco.mj_saveLastXML(str(tmp_path), m)
+            tree = ET.parse(tmp_path)
+            root_mjcf = tree.getroot()
+            act_elem = ET.SubElement(root_mjcf, "actuator")
+            is_panda = "panda" in path.name.lower()
+            is_so = "so" in path.name.lower()
+            kp = "200" if is_panda else ("150" if is_so else "100")
+            kv = "20" if is_panda else ("15" if is_so else "10")
+            for i in range(m.njnt):
+                if int(m.jnt_type[i]) != int(mujoco.mjtJoint.mjJNT_FREE):
+                    j_name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, i)
+                    if j_name:
+                        ctrlrange = "0 0.04" if "finger" in j_name.lower() else None
+                        attrs = {"name": f"{j_name}_ctrl", "joint": j_name, "kp": kp, "kv": kv}
+                        if ctrlrange:
+                            attrs["ctrlrange"] = ctrlrange
+                        ET.SubElement(act_elem, "position", **attrs)
+                        synthetic_acts.append(f"{j_name}_ctrl (kp={kp}, kv={kv})")
+            tree.write(tmp_path)
+            m = mujoco.MjModel.from_xml_path(str(tmp_path))
+        except Exception as e:
+            logger.warning("Auto actuator generation failed for %s: %s", path.name, str(e))
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    # Determine fidelity status
+    if synthetic_acts or injected_damp or repaired_inerts:
+        fidelity_status = "physically_modified"
+        if synthetic_acts:
+            caveats.append(f"Synthesized {len(synthetic_acts)} position servo actuator(s) for joints lacking URDF actuators.")
+        if injected_damp:
+            caveats.append(f"Injected 0.1 N*s/m joint damping across {len(injected_damp)} joint(s) for numerical stability.")
+        if repaired_inerts:
+            caveats.append(f"Zeroed singular non-diagonal inertia elements across {len(repaired_inerts)} link(s).")
+    elif syntax_fixes or asset_repairs:
+        fidelity_status = "repaired_syntax_only"
+        caveats.append("Description syntax and asset paths resolved; physical dynamics are unchanged.")
+    else:
+        fidelity_status = "faithful"
+        caveats.append("Native model loaded directly without modifications.")
+
+    _MODEL_FIDELITY_REGISTRY[str(path.resolve())] = {
+        "model_path": str(path.resolve()),
+        "fidelity_status": fidelity_status,
+        "syntax_normalizations": syntax_fixes,
+        "asset_repairs": asset_repairs,
+        "synthetic_actuators": synthetic_acts,
+        "injected_damping": injected_damp,
+        "repaired_inertias": repaired_inerts,
+        "caveats": caveats,
+    }
+
+    return m
 
 
 class MujocoAdapter(SimulatorAdapter):
@@ -33,7 +248,7 @@ class MujocoAdapter(SimulatorAdapter):
 
     @property
     def supported_formats(self) -> Tuple[str, ...]:
-        return ("MJCF", "XML")
+        return ("MJCF", "XML", "URDF")
 
     def probe_environment(self) -> Dict[str, Any]:
         """Probe environment for MuJoCo Python package and render capabilities."""
@@ -100,13 +315,12 @@ class MujocoAdapter(SimulatorAdapter):
                 "error": f"Model assets for '{robot_model.id}' not found in cache ({model_cache_dir}). Run model preparation first.",
             }
 
-        entrypoint_name = robot_model.description_info.get("entrypoint", f"{robot_model.id}.xml")
-        entrypoint_file = model_cache_dir / entrypoint_name
-        if not entrypoint_file.exists():
-            # Check for scene.xml or any xml file
-            if (model_cache_dir / "scene.xml").exists():
-                entrypoint_file = model_cache_dir / "scene.xml"
-            else:
+        if (model_cache_dir / "scene.xml").exists():
+            entrypoint_file = model_cache_dir / "scene.xml"
+        else:
+            entrypoint_name = robot_model.description_info.get("entrypoint", f"{robot_model.id}.xml")
+            entrypoint_file = model_cache_dir / entrypoint_name
+            if not entrypoint_file.exists():
                 xmls = list(model_cache_dir.glob("*.xml"))
                 if xmls:
                     entrypoint_file = xmls[0]
@@ -145,7 +359,7 @@ class MujocoAdapter(SimulatorAdapter):
         import mujoco
 
         try:
-            m = mujoco.MjModel.from_xml_path(str(model_path))
+            m = load_mujoco_model(model_path)
             stats = {
                 "nq": int(m.nq),
                 "nv": int(m.nv),
@@ -196,7 +410,7 @@ class MujocoAdapter(SimulatorAdapter):
 
         model_path = Path(context["model_path"])
         try:
-            m = mujoco.MjModel.from_xml_path(str(model_path))
+            m = load_mujoco_model(model_path)
             d = mujoco.MjData(m)
             # Step one time to initialize state
             mujoco.mj_step(m, d)
@@ -214,7 +428,7 @@ class MujocoAdapter(SimulatorAdapter):
         import numpy as np
 
         model_path = Path(context["model_path"])
-        m = mujoco.MjModel.from_xml_path(str(model_path))
+        m = load_mujoco_model(model_path)
         d = mujoco.MjData(m)
 
         # Milestone A: Model structure
@@ -295,7 +509,7 @@ class MujocoAdapter(SimulatorAdapter):
         }
 
     def launch_gui(self, context: Any) -> Dict[str, Any]:
-        """Launch the official MuJoCo interactive viewer."""
+        """Launch the bounded MuJoCo viewer and physics loop."""
         env = os.environ.copy()
         if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
             if os.path.exists("/tmp/.X11-unix/X1"):
@@ -321,43 +535,52 @@ class MujocoAdapter(SimulatorAdapter):
         scene_path = model_path.parent / "scene.xml"
         view_target = scene_path if scene_path.exists() else model_path
 
-        # Check if custom velocity command is requested
-        velocity = 5.44
-        if isinstance(context, dict) and "velocity" in context:
+        # A GUI-only launch must not move a robot. An action is enabled only
+        # when the caller supplied an explicit velocity in its runtime context.
+        velocity = 0.0
+        wheel_name = "wheel1_speed"
+        action_duration_sec = 0.0
+        max_runtime_sec = 60.0
+        if isinstance(context, dict):
             try:
-                velocity = float(context["velocity"])
-            except (ValueError, TypeError):
-                velocity = 5.44
+                if "velocity" in context:
+                    velocity = float(context["velocity"])
+                    wheel_name = str(context.get("wheel_name", wheel_name))
+                    action_duration_sec = float(context.get(
+                        "action_duration_sec", context.get("duration_sec", 0.5)
+                    ))
+                max_runtime_sec = float(context.get("max_runtime_sec", max_runtime_sec))
+            except (TypeError, ValueError) as exc:
+                return {"success": False, "error": f"Invalid MuJoCo runtime setting: {exc}"}
 
-        runner_module = "robosahaya.simulators.mujoco_runner"
+        runner_path = Path(__file__).with_name("mujoco_runner.py")
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-m", runner_module, str(view_target), str(velocity)],
+                [
+                    sys.executable,
+                    str(runner_path),
+                    str(view_target),
+                    str(velocity),
+                    wheel_name,
+                    str(action_duration_sec),
+                    str(max_runtime_sec),
+                ],
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-            import time
             time.sleep(0.4)
             ret = proc.poll()
             if ret is not None:
-                # Fallback to standard viewer
-                proc = subprocess.Popen(
-                    [sys.executable, "-m", "mujoco.viewer", f"--mjcf={str(view_target)}"],
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
-                )
-                time.sleep(0.4)
-                ret2 = proc.poll()
-                if ret2 is not None:
-                    _, err = proc.communicate()
-                    err_msg = err.decode().strip() or f"Viewer process exited immediately with returncode {ret2}"
-                    return {"success": False, "error": err_msg}
+                out, err = proc.communicate()
+                details = err.decode(errors="replace").strip() or out.decode(errors="replace").strip()
+                return {
+                    "success": False,
+                    "error": details or f"MuJoCo runner exited immediately with returncode {ret}",
+                    "returncode": ret,
+                }
 
             self._active_processes[task_id] = proc
             return {"success": True, "pid": proc.pid, "target": str(view_target)}
@@ -370,6 +593,31 @@ class MujocoAdapter(SimulatorAdapter):
             proc = self._active_processes.pop(task_id)
             if proc.poll() is None:
                 proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
 
     def cleanup(self, context: Dict[str, Any]) -> None:
         self.stop(context)
+
+
+    def execute_skill(
+        self, skill_id: str, params: Dict[str, Any], context: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute a canonical action through the real MuJoCo task controller."""
+        from robosahaya.simulators.task_execution import MujocoTaskExecutionAdapter
+        return MujocoTaskExecutionAdapter().execute_skill(skill_id, params, context)
+
+    def observe_state(self, query: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """Read actual joint, actuator, body, or sensor state from MuJoCo."""
+        from robosahaya.simulators.task_execution import MujocoTaskExecutionAdapter
+        return MujocoTaskExecutionAdapter().observe_state(query, context)
+
+    def verify_predicate(
+        self, predicate_type: str, spec: Dict[str, Any], context: Dict[str, Any]
+    ) -> Tuple[bool, str]:
+        """Evaluate a supported predicate against measured MuJoCo state."""
+        from robosahaya.simulators.task_execution import MujocoTaskExecutionAdapter
+        return MujocoTaskExecutionAdapter().verify_predicate(predicate_type, spec, context)

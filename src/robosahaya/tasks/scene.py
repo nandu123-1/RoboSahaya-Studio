@@ -5,10 +5,43 @@ and camera-derived perceptions without fabricating detections.
 """
 from __future__ import annotations
 
+from enum import Enum
 import math
 from typing import Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class ObservationSource(str, Enum):
+    """Authoritative source of scene observation data."""
+    GROUND_TRUTH_SIM = "ground_truth_sim"
+    CAMERA_RGB = "camera_rgb"
+    DEPTH_CAMERA = "depth_camera"
+    LIDAR_POINTCLOUD = "lidar_pointcloud"
+    SENSOR_DERIVED = "sensor_derived"
+    USER_SPECIFIED = "user_specified"
+
+    # Backward compatibility aliases
+    GROUND_TRUTH = "ground_truth"
+    CAMERA_DETECTED = "camera_detected"
+
+
+def normalize_observation_source(source: ObservationSource | str | None) -> ObservationSource:
+    """Normalize input string or enum to canonical ObservationSource."""
+    if source is None:
+        return ObservationSource.GROUND_TRUTH_SIM
+    val = source.value if isinstance(source, ObservationSource) else str(source).lower().strip()
+    if val in ("ground_truth", "ground_truth_sim", "sim", "gt"):
+        return ObservationSource.GROUND_TRUTH_SIM
+    if val in ("camera_rgb", "camera_detected", "rgb", "camera", "vision"):
+        return ObservationSource.CAMERA_RGB
+    if val in ("depth_camera", "depth", "rgbd"):
+        return ObservationSource.DEPTH_CAMERA
+    if val in ("lidar_pointcloud", "lidar", "laser", "pointcloud", "scan"):
+        return ObservationSource.LIDAR_POINTCLOUD
+    if val in ("user_specified", "user"):
+        return ObservationSource.USER_SPECIFIED
+    return ObservationSource.SENSOR_DERIVED
 
 
 class SceneEntity(BaseModel):
@@ -21,7 +54,7 @@ class SceneEntity(BaseModel):
     pose: Tuple[float, float, float, float, float, float]  # x, y, z, roll, pitch, yaw
     dimensions: Tuple[float, float, float] = (0.04, 0.04, 0.04)
     is_static: bool = False
-    source: Literal["ground_truth", "camera_detected", "user_specified"] = "ground_truth"
+    source: ObservationSource | str = ObservationSource.GROUND_TRUTH.value
     confidence: float = 1.0
     color: Optional[str] = None
 
@@ -81,15 +114,36 @@ class WorldScene:
                 if not ent.is_static and (ent.color == "green" or "green" in ent.id or "green" in ent.name.lower()):
                     return ent
 
+        # Check marker / waypoint / landmark / obstacle matches
+        # Prioritize marker/waypoint over obstacle when both keywords appear
+        if "marker" in q or "waypoint" in q or "landmark" in q:
+            for ent in self._entities.values():
+                if "marker" in ent.id or "marker" in ent.name.lower() or ent.entity_type == "waypoint":
+                    return ent
+        for ent in self._entities.values():
+            if not ent.is_static and (ent.id in q or ent.name.lower() in q):
+                return ent
+            if "obstacle" in q and (("obstacle" in ent.id or ent.entity_type == "obstacle") and "marker" not in q):
+                return ent
+
         # Type matches (strictly dynamic non-static manipulable entities)
+        # Avoid false positive matching if an ungrounded color or unknown shape was requested
+        unknown_descriptors = ("purple", "yellow", "orange", "cylinder", "pyramid", "triangle", "cup", "can", "bottle", "nonexistent", "unknown")
+        if any(w in q for w in unknown_descriptors):
+            for ent in self._entities.values():
+                if not ent.is_static and ((ent.color and ent.color in q) or (ent.entity_type and ent.entity_type in q) or (ent.name.lower() in q)):
+                    return ent
+            return None
+
         for ent in self._entities.values():
             if not ent.is_static and (ent.entity_type in q or ent.name.lower() in q):
                 return ent
 
-        # Fallback to first non-static manipulation object (e.g. target_cube_red)
-        for ent in self._entities.values():
-            if not ent.is_static and ent.entity_type in ("cube", "ball", "box", "object", "block"):
-                return ent
+        # Fallback to first non-static manipulation object ONLY when query is empty or generically refers to 'object'/'item'
+        if not q or any(w in q for w in ("object", "item", "something")):
+            for ent in self._entities.values():
+                if not ent.is_static and ent.entity_type in ("cube", "ball", "box", "object", "block"):
+                    return ent
 
         return None
 

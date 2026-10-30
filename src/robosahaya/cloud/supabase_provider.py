@@ -53,11 +53,19 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
     def is_connected(self) -> bool:
         if not self._rest_url or not self.service_key:
             return False
+        import time
+        now = time.time()
+        if hasattr(self, "_last_connected_time") and now - self._last_connected_time < 15.0:
+            return self._last_connected_result
         try:
             client = self._get_client()
             res = client.get(f"{self._rest_url}/robot_models?select=id&limit=1", headers=self._headers())
-            return res.status_code in (200, 206)
+            self._last_connected_result = res.status_code in (200, 206)
+            self._last_connected_time = now
+            return self._last_connected_result
         except Exception:
+            self._last_connected_result = False
+            self._last_connected_time = now
             return False
 
     def list_models(
@@ -265,6 +273,51 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
             logger.warning("Error fetching assets for version '%s': %s", version_id, str(e))
         return []
 
+    def list_all_versions(self) -> List[CloudVersionRecord]:
+        if not self._rest_url or not self.service_key:
+            return []
+        try:
+            client = self._get_client()
+            res = client.get(f"{self._rest_url}/robot_model_versions?select=*&limit=1000", headers=self._headers())
+            if res.status_code == 200:
+                data = res.json()
+                return [
+                    CloudVersionRecord(
+                        id=row["id"],
+                        robot_model_id=row["robot_model_id"],
+                        version=row["version"],
+                        source_type=row.get("source_type", "upstream"),
+                        source_repository=row.get("source_repository", ""),
+                        source_revision=row.get("source_revision", ""),
+                        description_format=row["description_format"],
+                        entrypoint_path=row["entrypoint_path"],
+                        manifest_path=row.get("manifest_path", ""),
+                        content_fingerprint=row["content_fingerprint"],
+                        validation_metadata=row.get("validation_metadata") or {},
+                    )
+                    for row in data
+                ]
+        except Exception as e:
+            logger.warning("Error fetching all versions from Supabase: %s", str(e))
+        return []
+
+    def get_asset_counts(self) -> Dict[str, int]:
+        if not self._rest_url or not self.service_key:
+            return {}
+        try:
+            client = self._get_client()
+            res = client.get(f"{self._rest_url}/robot_model_assets?select=robot_model_version_id&limit=10000", headers=self._headers())
+            if res.status_code == 200:
+                counts: Dict[str, int] = {}
+                for row in res.json():
+                    vid = row.get("robot_model_version_id")
+                    if vid:
+                        counts[vid] = counts.get(vid, 0) + 1
+                return counts
+        except Exception as e:
+            logger.warning("Error fetching asset counts from Supabase: %s", str(e))
+        return {}
+
     def upsert_asset(self, asset: CloudAssetRecord) -> bool:
         if not self._rest_url or not self.service_key:
             return False
@@ -363,7 +416,7 @@ class SupabaseCatalogueProvider(BaseCatalogueProvider):
 class SupabaseStorageProvider(BaseStorageProvider):
     """Client for Supabase Storage v1 REST API."""
 
-    def __init__(self, base_url: str, service_key: str, bucket_name: str = "robot-model-packages", timeout: float = 30.0):
+    def __init__(self, base_url: str, service_key: str, bucket_name: str = "robot-model-packages", timeout: float = 120.0):
         self.base_url = (base_url or "").rstrip("/")
         self.service_key = service_key or ""
         self.bucket = bucket_name or "robot-model-packages"
@@ -389,16 +442,24 @@ class SupabaseStorageProvider(BaseStorageProvider):
     def is_connected(self) -> bool:
         if not self._storage_url or not self.service_key:
             return False
+        import time
+        now = time.time()
+        if hasattr(self, "_last_connected_time") and now - self._last_connected_time < 15.0:
+            return self._last_connected_result
         try:
             client = self._get_client()
             res = client.get(f"{self._storage_url}/bucket/{self.bucket}", headers=self._headers())
-            return res.status_code in (200, 404)  # 404 means server reachable but bucket not yet created
+            self._last_connected_result = res.status_code in (200, 404)  # 404 means server reachable but bucket not yet created
+            self._last_connected_time = now
+            return self._last_connected_result
         except Exception:
+            self._last_connected_result = False
+            self._last_connected_time = now
             return False
 
     def check_object(self, object_key: str) -> Dict[str, Any]:
         if not self._storage_url or not self.service_key or not object_key:
-            return {"exists": False, "size": 0, "sha256": None}
+            return {"exists": False, "size": 0, "sha256": None, "content_encoding": ""}
         try:
             clean_key = object_key.lstrip("/")
             client = self._get_client()
@@ -408,7 +469,8 @@ class SupabaseStorageProvider(BaseStorageProvider):
             if res.status_code == 200:
                 size = int(res.headers.get("content-length", 0))
                 etag = res.headers.get("etag", "").strip('"')
-                if size == 0:
+                encoding = res.headers.get("content-encoding", "")
+                if size == 0 or not encoding:
                     # Fallback for gateways suppressing content-length on head
                     folder = "/".join(clean_key.split("/")[:-1])
                     fname = clean_key.split("/")[-1]
@@ -422,11 +484,12 @@ class SupabaseStorageProvider(BaseStorageProvider):
                             if item.get("name") == fname and "metadata" in item:
                                 size = int(item["metadata"].get("size", size))
                                 etag = item["metadata"].get("eTag", etag).strip('"')
+                                encoding = item["metadata"].get("contentEncoding", encoding)
                                 break
-                return {"exists": True, "size": size, "sha256": etag}
+                return {"exists": True, "size": size, "sha256": etag, "content_encoding": encoding}
         except Exception as e:
             logger.debug("check_object failed for %s: %s", object_key, str(e))
-        return {"exists": False, "size": 0, "sha256": None}
+        return {"exists": False, "size": 0, "sha256": None, "content_encoding": ""}
 
     def resolve_download_url(self, object_key: str, expires_in: int = 3600) -> Optional[str]:
         if not self._storage_url or not self.service_key or not object_key:
@@ -488,13 +551,45 @@ class SupabaseStorageProvider(BaseStorageProvider):
             headers["Content-Type"] = "application/octet-stream"
             headers["x-upsert"] = "true"
             client = self._get_client()
-            with open(file_path, "rb") as f:
+
+            file_size = file_path.stat().st_size
+            # If file exceeds 45 MB, compress with gzip to stay within Supabase Storage free-tier limit (<50MB)
+            if file_size > 45 * 1024 * 1024:
+                import gzip
+                data = gzip.compress(file_path.read_bytes())
+                headers["Content-Encoding"] = "gzip"
+                if file_path.suffix.lower() == ".dae":
+                    headers["Content-Type"] = "model/vnd.collada+xml"
+                elif file_path.suffix.lower() in (".xml", ".urdf", ".xacro"):
+                    headers["Content-Type"] = "application/xml"
                 res = client.post(
                     f"{self._storage_url}/object/{self.bucket}/{clean_key}",
                     headers=headers,
-                    content=f.read()
+                    content=data
                 )
                 return res.status_code in (200, 201)
+
+            with open(file_path, "rb") as f:
+                content = f.read()
+            res = client.post(
+                f"{self._storage_url}/object/{self.bucket}/{clean_key}",
+                headers=headers,
+                content=content
+            )
+            if res.status_code in (200, 201):
+                return True
+            if res.status_code == 413 or (res.status_code == 400 and "EntityTooLarge" in res.text):
+                # Fallback to gzip compression if raw upload exceeded gateway limit
+                import gzip
+                data = gzip.compress(content)
+                headers["Content-Encoding"] = "gzip"
+                res_retry = client.post(
+                    f"{self._storage_url}/object/{self.bucket}/{clean_key}",
+                    headers=headers,
+                    content=data
+                )
+                return res_retry.status_code in (200, 201)
+            return False
         except Exception as e:
             logger.warning("Error uploading package '%s': %s", object_key, str(e))
             return False

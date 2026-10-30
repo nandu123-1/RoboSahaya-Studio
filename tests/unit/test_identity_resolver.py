@@ -58,3 +58,20 @@ def test_unknown_query_does_not_silently_substitute(resolver):
     assert result.resolved_id is None
     assert result.confidence == 0.0
     assert result.match_type == "none"
+
+
+def test_registry_alias_collision_is_not_first_match_wins(resolver):
+    result = resolver.resolve("arm robot")
+    assert result.requires_clarification is True
+    assert result.match_type == "ambiguous"
+
+
+def test_catalogue_canonical_id_precedes_cross_catalogue_alias(resolver):
+    result = resolver.resolve("rsk")
+    assert result.resolved_id == "rsk"
+    assert result.confidence == 1.0
+    assert result.match_type == "canonical"
+
+    result_so = resolver.resolve("so_arm100")
+    assert result_so.resolved_id == "so_arm100"
+    assert result_so.match_type == "canonical"

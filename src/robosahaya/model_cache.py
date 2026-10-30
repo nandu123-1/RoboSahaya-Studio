@@ -9,7 +9,9 @@ Guarantees:
 """
 from __future__ import annotations
 
+import ast
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -166,6 +168,8 @@ class ModelCacheManager:
                 # 4. If we have asset records from cloud storage
                 if assets_list:
                     for asset in assets_list:
+                        if asset.relative_path in {"manifest.json", "metadata.json"}:
+                            continue
                         safe_dest = self.validate_path_safety(staging_dir, asset.relative_path)
                         safe_dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -307,6 +311,8 @@ class ModelCacheManager:
             assets = manifest.get("assets", [])
             for a in assets:
                 rel = a["relative_path"]
+                if rel in {"manifest.json", "metadata.json"}:
+                    continue
                 expected_sha = a["sha256"]
                 target_file = v_dir / rel
                 if not target_file.exists():
@@ -325,3 +331,100 @@ class ModelCacheManager:
             shutil.rmtree(v_dir, ignore_errors=True)
             return True
         return False
+
+    @staticmethod
+    def _resolve_cached_description_module(module_name: str) -> Optional[tuple[Path, Path]]:
+        """Read robot_descriptions module path constants without importing it.
+
+        The upstream package's generated description modules share a small
+        convention: a repository is obtained with ``clone_to_cache`` and the
+        package and entrypoint paths are built with ``os.path.join``. Resolve
+        that convention against the configured robot_descriptions cache. This
+        avoids network access when the source is already present.
+        """
+        try:
+            spec = importlib.util.find_spec(f"robot_descriptions.{module_name}")
+            if spec is None or not spec.origin:
+                return None
+            module_ast = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+            repository_name: Optional[str] = None
+            for node in ast.walk(module_ast):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_clone = (
+                    isinstance(func, ast.Name) and func.id in {"_clone_to_cache", "clone_to_cache"}
+                ) or (
+                    isinstance(func, ast.Attribute) and func.attr == "clone_to_cache"
+                )
+                if is_clone and node.args and isinstance(node.args[0], ast.Constant):
+                    if isinstance(node.args[0].value, str):
+                        repository_name = node.args[0].value
+                        break
+            if not repository_name:
+                return None
+
+            # Importing _repositories only loads static metadata; unlike a model
+            # description module it has no clone or download side effects.
+            repositories = importlib.import_module("robot_descriptions._repositories").REPOSITORIES
+            repository = repositories.get(repository_name)
+            if repository is None:
+                return None
+
+            cache_root = Path(os.environ.get(
+                "ROBOT_DESCRIPTIONS_CACHE", str(Path.home() / ".cache" / "robot_descriptions")
+            )).expanduser().resolve()
+            cache_path = Path(repository.cache_path)
+            repo_roots = [cache_root / cache_path]
+            if cache_root.is_dir():
+                repo_roots.extend(
+                    candidate / cache_path
+                    for candidate in cache_root.glob(f"{cache_path.name}-*")
+                    if candidate.is_dir()
+                )
+
+            # Evaluate the module's conventional path joins using only literal
+            # components and previously resolved constants.
+            for repo_root in repo_roots:
+                repo_root = repo_root.resolve()
+                if not repo_root.is_dir() or not repo_root.is_relative_to(cache_root):
+                    continue
+                values: dict[str, Path] = {"REPOSITORY_PATH": repo_root}
+                for statement in module_ast.body:
+                    if not isinstance(statement, ast.AnnAssign) or not isinstance(statement.target, ast.Name):
+                        continue
+                    target = statement.target.id
+                    value_node = statement.value
+                    if target == "REPOSITORY_PATH":
+                        values[target] = repo_root
+                        continue
+                    evaluated = ModelCacheManager._evaluate_description_path(value_node, values)
+                    if evaluated is not None:
+                        values[target] = evaluated
+                package_root = values.get("PACKAGE_PATH") or values.get("REPOSITORY_PATH")
+                entrypoint = next((values.get(name) for name in ("URDF_PATH", "XACRO_PATH", "MJCF_PATH") if values.get(name)), None)
+                if package_root and entrypoint:
+                    package_root = package_root.resolve()
+                    entrypoint = entrypoint.resolve()
+                    if package_root.is_dir() and entrypoint.is_file() and entrypoint.is_relative_to(package_root):
+                        return package_root, entrypoint
+        except (ImportError, OSError, SyntaxError, ValueError, TypeError, AttributeError):
+            return None
+        return None
+
+    @staticmethod
+    def _evaluate_description_path(node: ast.AST, values: Dict[str, Path]) -> Optional[Path]:
+        """Evaluate literal pathlib/os.path.join expressions from a module AST."""
+        if isinstance(node, ast.Name):
+            return values.get(node.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join":
+            base = ModelCacheManager._evaluate_description_path(node.args[0], values) if node.args else None
+            components: list[str] = []
+            for arg in node.args[1:]:
+                if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
+                    return None
+                components.append(arg.value)
+            if base is not None:
+                return base.joinpath(*components)
+        return None
+

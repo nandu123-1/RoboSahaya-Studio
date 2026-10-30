@@ -2,54 +2,31 @@
 
 Orchestrates multi-robot skill execution, intermediate simulation observation,
 bounded recovery, and measurable verification without fabricated results.
+Coordinates with Agent B via documented contracts and SimulatorTaskController.
 """
 from __future__ import annotations
 
 import logging
 import time
-from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from robosahaya.evidence_models import TaskEvent, TaskStage, TestResult
-from .skills import SkillRegistry, SkillResult, SkillStatus, get_skill_registry
-from .specification import ActionStep, TaskSpecification
+from .contracts import (
+    ActionResult,
+    ActionStep,
+    ExecutionObservation,
+    ObservationRecord,
+    SkillAction,
+    SkillResult,
+    SkillStatus,
+    TaskExecutionState,
+    TaskSpecification,
+    VerificationResult,
+    VerificationVerdict,
+)
+from .skills import SkillRegistry, get_skill_registry
 
 logger = logging.getLogger(__name__)
-
-
-class TaskExecutionState(str, Enum):
-    """Execution state machine states."""
-    TASK_RECEIVED = "task_received"
-    TASK_PARSED = "task_parsed"
-    CAPABILITIES_CHECKED = "capabilities_checked"
-    SCENE_VALIDATED = "scene_validated"
-    PLAN_READY = "plan_ready"
-    AWAITING_APPROVAL = "awaiting_approval"
-    EXECUTING = "executing"
-    OBSERVING = "observing"
-    RECOVERING = "recovering"
-    VERIFYING = "verifying"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    BLOCKED = "blocked"
-    CANCELLED = "cancelled"
-
-
-class ExecutionObservation(BaseModel):
-    """Observation recorded after an action step execution."""
-    model_config = ConfigDict(extra="ignore")
-
-    step_index: int
-    skill_id: str
-    timestamp: float = Field(default_factory=time.time)
-    preconditions_met: bool
-    commanded_parameters: Dict[str, Any] = Field(default_factory=dict)
-    observed_state: Dict[str, Any] = Field(default_factory=dict)
-    step_success: bool
-    recovery_attempted: bool = False
-    details: str = ""
 
 
 class ClosedLoopExecutor:
@@ -90,7 +67,14 @@ class ClosedLoopExecutor:
         # 1. Check if specification is supported
         if not specification.is_supported:
             reason = specification.rejection_reason or "Task rejected: unsupported capabilities or scene objects."
+            specification.plan_status = "rejected"
             emit(TaskStage.BLOCKED, reason, severity="error")
+            verif_res = VerificationResult(
+                task_id=task_id,
+                verdict=VerificationVerdict.BLOCKED,
+                success=False,
+                summary=reason,
+            )
             return {
                 "task_id": task_id,
                 "state": TaskExecutionState.BLOCKED.value,
@@ -98,12 +82,15 @@ class ClosedLoopExecutor:
                 "success": False,
                 "error": reason,
                 "observations": [],
+                "specification": specification,
+                "verification_result": verif_res,
             }
 
+        specification.plan_status = "executing"
         emit(TaskStage.PLANNING, f"Task parsed: {specification.task_type.value.upper()} ({len(specification.action_sequence)} action steps).")
         emit(TaskStage.PREPARING, f"Checking scene objects: {', '.join(specification.target_objects) or 'nominal'}. Robot: {specification.canonical_robot_id}.")
 
-        observations: List[ExecutionObservation] = []
+        observations: List[ObservationRecord] = []
         overall_success = True
         failure_reason: Optional[str] = None
 
@@ -114,19 +101,35 @@ class ClosedLoopExecutor:
         # 2. Iterate through action steps
         for step in specification.action_sequence:
             if self._is_cancelled:
+                specification.plan_status = "failed"
                 emit(TaskStage.CANCELLED, "Execution interrupted by cancellation request.", severity="warning")
+                verif_res = VerificationResult(
+                    task_id=task_id,
+                    verdict=VerificationVerdict.UNVERIFIED,
+                    success=False,
+                    summary="Execution interrupted by user cancellation.",
+                )
                 return {
                     "task_id": task_id,
                     "state": TaskExecutionState.CANCELLED.value,
                     "stage": TaskStage.CANCELLED,
                     "success": False,
                     "observations": observations,
+                    "specification": specification,
+                    "verification_result": verif_res,
                 }
 
             skill = self.skill_registry.get_skill(step.skill_id)
             if not skill:
                 err = f"Skill '{step.skill_id}' is not registered in the execution engine."
+                specification.plan_status = "failed"
                 emit(TaskStage.FAILED, err, severity="error")
+                verif_res = VerificationResult(
+                    task_id=task_id,
+                    verdict=VerificationVerdict.VERIFIED_FAILURE,
+                    success=False,
+                    summary=err,
+                )
                 return {
                     "task_id": task_id,
                     "state": TaskExecutionState.FAILED.value,
@@ -134,23 +137,25 @@ class ClosedLoopExecutor:
                     "success": False,
                     "error": err,
                     "observations": observations,
+                    "specification": specification,
+                    "verification_result": verif_res,
                 }
 
             emit(TaskStage.LAUNCHING, f"Step {step.step_index}/{len(specification.action_sequence)}: {step.description}", tool=step.skill_id)
 
             # Step execution loop with bounded retries
             step_success = False
-            last_skill_res: Optional[SkillResult] = None
+            last_skill_res: Optional[ActionResult] = None
             retry_count = 0
+            allowed_retries = step.max_retries if getattr(step, "can_retry", True) else 0
 
-            while retry_count <= self.max_retries and not step_success:
+            while retry_count <= allowed_retries and not step_success:
                 try:
-                    # Execute skill
                     last_skill_res = skill.execute(step.parameters, context)
                     step_success = last_skill_res.success
                 except Exception as exc:
                     logger.error("Error executing skill '%s': %s", step.skill_id, exc)
-                    last_skill_res = SkillResult(
+                    last_skill_res = ActionResult(
                         skill_id=step.skill_id,
                         status=SkillStatus.FAILED,
                         success=False,
@@ -159,11 +164,11 @@ class ClosedLoopExecutor:
                     )
                     step_success = False
 
-                if not step_success and retry_count < self.max_retries and step.is_critical:
+                if not step_success and retry_count < allowed_retries and step.is_critical:
                     retry_count += 1
                     emit(
                         TaskStage.TESTING,
-                        f"Observation check failed: {last_skill_res.details}. Attempting recovery retry {retry_count}/{self.max_retries}...",
+                        f"Observation check failed: {last_skill_res.details}. Attempting recovery retry {retry_count}/{allowed_retries}...",
                         severity="warning",
                     )
                     time.sleep(0.2)
@@ -171,9 +176,10 @@ class ClosedLoopExecutor:
                     break
 
             # Record step observation
-            obs = ExecutionObservation(
+            obs = ObservationRecord(
                 step_index=step.step_index,
                 skill_id=step.skill_id,
+                timestamp=time.time(),
                 preconditions_met=True,
                 commanded_parameters=step.parameters,
                 observed_state=last_skill_res.measured_data if last_skill_res else {},
@@ -192,11 +198,14 @@ class ClosedLoopExecutor:
                 break
 
         # 3. Post-execution Verification Phase
+        condition_results: List[Dict[str, Any]] = []
+        placement_satisfied = None
+        placement_details = None
+
         if overall_success:
             emit(TaskStage.TESTING, "Evaluating final task verification conditions...")
             condition_failures = []
             for cond in specification.verification_conditions:
-                # Find measured metric across observations
                 measured = None
                 for obs in reversed(observations):
                     if cond.metric in obs.observed_state:
@@ -204,9 +213,25 @@ class ClosedLoopExecutor:
                         break
 
                 passed, cond_msg = cond.check(measured)
+                condition_results.append({
+                    "condition_name": cond.name,
+                    "metric": cond.metric,
+                    "measured": measured,
+                    "expected": cond.expected_value,
+                    "passed": passed,
+                    "message": cond_msg,
+                })
                 if not passed and cond.is_mandatory:
                     condition_failures.append(cond_msg)
                 emit(TaskStage.TESTING, f"Verification condition: {cond_msg}", severity="info" if passed else "error")
+
+            # Check placement predicate specifically if present
+            if specification.placement_predicate:
+                for obs in reversed(observations):
+                    if "object_xyz" in obs.observed_state:
+                        pos = obs.observed_state["object_xyz"]
+                        placement_satisfied, placement_details = specification.placement_predicate.evaluate(pos)
+                        break
 
             if condition_failures:
                 overall_success = False
@@ -231,6 +256,7 @@ class ClosedLoopExecutor:
             status="passed" if overall_success else "failed",
         )
 
+        specification.plan_status = "completed" if overall_success else "failed"
         final_stage = TaskStage.COMPLETED if overall_success else TaskStage.FAILED
         status_msg = (
             f"Task '{specification.original_instruction}' verified and COMPLETED successfully."
@@ -239,6 +265,21 @@ class ClosedLoopExecutor:
         )
         emit(final_stage, status_msg, severity="success" if overall_success else "error", tool="task_verifier")
 
+        verdict = VerificationVerdict.VERIFIED_SUCCESS if overall_success else VerificationVerdict.VERIFIED_FAILURE
+        verif_res = VerificationResult(
+            task_id=task_id,
+            verdict=verdict,
+            success=overall_success,
+            placement_satisfied=placement_satisfied,
+            placement_details=placement_details,
+            condition_results=condition_results,
+            measured_values={
+                "steps_completed": len(observations),
+                "total_steps": len(specification.action_sequence),
+            },
+            summary=status_msg,
+        )
+
         return {
             "task_id": task_id,
             "state": TaskExecutionState.COMPLETED.value if overall_success else TaskExecutionState.FAILED.value,
@@ -246,6 +287,7 @@ class ClosedLoopExecutor:
             "success": overall_success,
             "error": failure_reason,
             "test_result": test_result,
+            "verification_result": verif_res,
             "observations": observations,
             "specification": specification,
         }

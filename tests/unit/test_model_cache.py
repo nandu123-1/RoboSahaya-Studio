@@ -89,3 +89,10 @@ def test_invalidate_cache(cache_mgr):
     ok = cache_mgr.invalidate_cache("rsk", version="v1.0.0")
     assert ok is True
     assert cache_mgr.is_cache_verified("rsk", version="v1.0.0") is False
+
+
+def test_missing_registered_source_does_not_promote_placeholder(cache_mgr):
+    """If a registered robot has no local or remote package source, do not promote a placeholder."""
+    res = cache_mgr.prepare_model("nonexistent_robot_xyz", version="v1.0.0")
+    assert res["success"] is False
+    assert cache_mgr.is_cache_verified("nonexistent_robot_xyz", version="v1.0.0") is False

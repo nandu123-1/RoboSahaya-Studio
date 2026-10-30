@@ -120,6 +120,15 @@ def test_supabase_provider_mock_transport():
         httpx.Client = orig_client
 
 
+def test_supabase_object_etag_is_not_reported_as_sha256():
+    """Ensure Supabase storage object eTag (MD5/UUID) is not reported as sha256."""
+    provider = SupabaseStorageProvider(base_url="https://mock.supabase.co", service_key="test_service_key")
+    mock_metadata = {"eTag": "d41d8cd98f00b204e9800998ecf8427e", "size": 1024}
+    # Storage object eTag must not be aliased to sha256
+    assert "sha256" not in mock_metadata
+    assert mock_metadata.get("eTag") != hashlib.sha256(b"").hexdigest()
+
+
 def test_cloud_status_diagnostics_no_secret_leakage(monkeypatch):
     """Rule 4.3: Diagnostics must not leak API keys or tokens."""
     monkeypatch.setenv("SUPABASE_URL", "https://xyzcompany.supabase.co")

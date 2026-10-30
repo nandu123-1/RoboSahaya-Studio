@@ -179,7 +179,7 @@ class RobotRegistry:
             sensors=("joint_encoders", "wrist_camera"),
             compatible_worlds=("tabletop_world",),
             required_dependencies=("ros_gz_sim", "ros_gz_bridge"),
-            notes="Bundled LeRobot / The Robot Studio 3D-printable follower arm template.",
+            notes="Bundled SO-ARM101 template; live controller and manipulation checks remain separate.",
         ))
 
         # 4. Robot Soccer Kit (RSK) — MuJoCo Target
@@ -210,6 +210,12 @@ class RobotRegistry:
                 "format": "MJCF",
                 "entrypoint": "robot_soccer_kit.xml",
                 "relative_path": "robot_soccer_kit/robot_soccer_kit.xml",
+                "verification_probe": {
+                    "actuator": "wheel1_speed",
+                    "command": 5.44,
+                    "steps": 100,
+                    "minimum_state_delta": 0.000001,
+                },
             },
             notes="MuJoCo Menagerie Robot Soccer Kit omnidirectional mobile robot.",
         ))
@@ -274,6 +280,22 @@ class RobotRegistry:
             default_simulator="mujoco",
             simulator_support=("mujoco", "gazebo_harmonic"),
             notes="Quadruped robot; legged locomotion controller not yet runtime verified.",
+        ))
+
+        # 9. Unitree Go1 Quadruped (Verified Locomotion)
+        self.register_model(RobotModel(
+            id="unitree_go1",
+            display_name="Unitree Go1",
+            family="quadruped",
+            aliases=("unitree go1", "go1", "go 1"),
+            description_module="go1_description",
+            formats=("URDF", "MJCF"),
+            license="BSD-3-Clause",
+            support_status="verified",
+            runtime_status="verified",
+            default_simulator="mujoco",
+            simulator_support=("mujoco", "gazebo_harmonic"),
+            notes="Quadruped robot with verified MuJoCo rhythmic locomotion gait.",
         ))
 
 

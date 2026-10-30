@@ -59,6 +59,8 @@ class TaskOrchestrator:
         self.inspector = inspector or self._init_inspector(mode)
         self.diag_engine = DiagnosticEngine(self.inspector)
         self._cancelled_tasks: set[str] = set()
+        from robosahaya.simulators.task_execution import SimulatorTaskExecutionAdapter
+        self.task_execution_adapter = SimulatorTaskExecutionAdapter()
 
     def _init_inspector(self, mode: str) -> BaseInspector:
         if mode == "live" and RCLPY_AVAILABLE and LiveRclpyInspector is not None:
@@ -100,6 +102,8 @@ class TaskOrchestrator:
     def cancel_task(self, task_id: str, message: str = "Task was cancelled by user."):
         """Signals task cancellation."""
         self._cancelled_tasks.add(task_id)
+        if hasattr(self, "task_execution_adapter"):
+            self.task_execution_adapter.cancel(task_id)
         self.ws_mgr.stop_task_runtime(task_id)
         return self._create_event(
             task_id,
@@ -297,11 +301,15 @@ class TaskOrchestrator:
     ) -> TaskPlan:
         infer = self.infer_robot_and_world(query, manual_overrides)
         overrides = dict(manual_overrides or {})
+        if template_id and "robot_template" not in overrides:
+            overrides["robot_template"] = template_id
+        if world_id and "world_template" not in overrides:
+            overrides["world_template"] = world_id
         rejection_reason = None
         is_supported = True
-        is_manual = False
+        is_manual = bool(overrides)
 
-        # If user explicitly provided manual overrides, clear ambiguous selection
+        # If user explicitly provided manual overrides or template_id, clear ambiguous selection
         if overrides.get("robot_template"):
             infer["unsupported_capabilities"] = [
                 c for c in infer["unsupported_capabilities"] if c != "ambiguous_robot_request"
@@ -650,42 +658,49 @@ class TaskOrchestrator:
             log_excerpt=f"{target_model.display_name} simulated in MuJoCo: 100 stable physics steps, 4 omnidirectional wheel actuators responded nominal velocity."
         )
 
+        gui_info = {}
         task_res = None
-        if plan and getattr(plan, "task_spec", None) and plan.task_spec.get("action_sequence"):
-            from .tasks.specification import TaskSpecification
-            from .tasks.executor import ClosedLoopExecutor
+        has_task_actions = bool(plan and getattr(plan, "task_spec", None) and plan.task_spec.get("action_sequence"))
+        if has_task_actions:
+            from robosahaya.tasks.contracts import TaskSpecification
             task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
-            import mujoco
-            m_ctx = mujoco.MjModel.from_xml_path(str(model_path))
-            d_ctx = mujoco.MjData(m_ctx)
-            executor = ClosedLoopExecutor()
-            task_res = await executor.execute_task(
+            task_res = await self.task_execution_adapter.execute_task(
                 task_spec_obj,
                 context={
-                    "mujoco_model": m_ctx,
-                    "mujoco_data": d_ctx,
                     "model_path": str(model_path),
                     "task_id": task_id,
+                    "viewer": not headless,
+                    "viewer_hold_sec": 3.0 if not headless else 0.0,
+                    "headless": headless,
                     "simulator": "mujoco",
                 },
                 on_event_cb=on_event_cb,
             )
             if task_res.get("test_result"):
                 verification_test = task_res["test_result"]
+            if not headless and task_res.get("state") != "blocked":
+                gui_info = {"success": True, "viewer": "in_session_passive", "task_id": task_id}
 
-        gui_info = {}
-        if not headless:
+            if not task_res.get("success", False):
+                term_stage = task_res.get("stage", TaskStage.FAILED)
+                emit(term_stage, f"{target_model.display_name} task {term_stage.value}: {task_res.get('error')}",
+                     severity="error" if term_stage == TaskStage.FAILED else "warning", speak=True)
+                return {
+                    "task_id": task_id,
+                    "stage": term_stage,
+                    "test_result": verification_test,
+                    "workspace_dir": str(ws),
+                    "milestones": milestones,
+                    "simulator": "mujoco",
+                    "model_id": target_model.id,
+                    "gui": gui_info,
+                    "observations": task_res.get("observations", []),
+                    "action_results": task_res.get("action_results", []),
+                    "error": task_res.get("error"),
+                }
+        elif not headless:
             emit(TaskStage.LAUNCHING, "Launching interactive MuJoCo 3D viewer on desktop...", speak=True, tool="launch_mujoco_viewer")
             cmd_vel = 5.44
-            if plan and getattr(plan, "task_spec", None) and plan.task_spec.get("action_sequence"):
-                for step in plan.task_spec.get("action_sequence", []):
-                    params = step.get("parameters", {})
-                    if "velocity" in params:
-                        try:
-                            cmd_vel = float(params["velocity"])
-                            break
-                        except (ValueError, TypeError):
-                            pass
             gui_info = adapter.launch_gui({"model_path": str(model_path), "task_id": task_id, "velocity": cmd_vel})
             if gui_info.get("success"):
                 emit(TaskStage.LAUNCHING, f"MuJoCo 3D viewer opened (PID: {gui_info.get('pid')}). Check your desktop for the 3D window.", severity="info")
@@ -701,7 +716,9 @@ class TaskOrchestrator:
             "milestones": milestones,
             "simulator": "mujoco",
             "model_id": target_model.id,
-            "gui": gui_info
+            "gui": gui_info,
+            "observations": task_res.get("observations", []) if task_res else [],
+            "action_results": task_res.get("action_results", []) if task_res else [],
         }
 
     async def _execute_pipeline_mock(self, task_id, query, inject_fault, template_id, world_id, plan=None, on_event_cb=None, headless=False):
@@ -756,18 +773,42 @@ class TaskOrchestrator:
 
         if is_arm:
             if plan and getattr(plan, "task_spec", None) and plan.task_spec.get("task_type") == "manipulation_pick_place":
-                from .tasks.specification import TaskSpecification
-                from .tasks.executor import ClosedLoopExecutor
-                task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
-                executor = ClosedLoopExecutor()
-                primary_test = plan.verification_tests[0] if (plan and plan.verification_tests) else "test_joint_states_payload"
-                task_res = await executor.execute_task(
-                    task_spec_obj,
-                    context={"simulator": "gazebo_harmonic", "task_id": task_id, "workspace_dir": str(ws), "primary_test_id": primary_test},
-                    on_event_cb=on_event_cb,
-                )
-                test_passed = task_res["success"]
-                verification_test = task_res["test_result"]
+                if plan.robot_template == "franka_panda":
+                    from robosahaya.tasks.contracts import TaskSpecification
+                    task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
+                    task_res = await self.task_execution_adapter.execute_task(
+                        task_spec_obj,
+                        context={"simulator": "gazebo_harmonic", "task_id": task_id, "workspace_dir": str(ws)},
+                        on_event_cb=on_event_cb,
+                    )
+                    test_passed = task_res.get("success", False)
+                    verification_test = task_res.get("test_result")
+                    if not test_passed:
+                        term_stage = task_res.get("stage", TaskStage.BLOCKED)
+                        emit(term_stage, f"Panda pick-and-place blocked: {task_res.get('error')}", severity="warning", speak=True)
+                        return {
+                            "task_id": task_id,
+                            "stage": term_stage,
+                            "test_result": verification_test,
+                            "workspace_dir": str(ws),
+                            "error": task_res.get("error"),
+                            "readiness": task_res.get("readiness"),
+                            "observations": task_res.get("observations", []),
+                            "action_results": task_res.get("action_results", []),
+                        }
+                else:
+                    from .tasks.specification import TaskSpecification
+                    from .tasks.executor import ClosedLoopExecutor
+                    task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
+                    executor = ClosedLoopExecutor()
+                    primary_test = plan.verification_tests[0] if (plan and plan.verification_tests) else "test_joint_states_payload"
+                    task_res = await executor.execute_task(
+                        task_spec_obj,
+                        context={"simulator": "gazebo_harmonic", "task_id": task_id, "workspace_dir": str(ws), "primary_test_id": primary_test},
+                        on_event_cb=on_event_cb,
+                    )
+                    test_passed = task_res["success"]
+                    verification_test = task_res["test_result"]
             else:
                 emit(TaskStage.TESTING, "Testing Joint States (/joint_states) and Wrist Camera (/camera/image_raw) data streams...", tool="sample_topic_messages")
                 test_passed = True
@@ -973,18 +1014,40 @@ class TaskOrchestrator:
                 source_mode="live", status="passed" if passed else "failed",
             )
             if passed:
-                if is_arm and plan and getattr(plan, "task_spec", None) and plan.task_spec.get("task_type") == "manipulation_pick_place":
-                    from .tasks.specification import TaskSpecification
-                    from .tasks.executor import ClosedLoopExecutor
+                if is_arm and plan and getattr(plan, "task_spec", None) and plan.task_spec.get("action_sequence"):
+                    from robosahaya.tasks.contracts import TaskSpecification
                     task_spec_obj = TaskSpecification.model_validate(plan.task_spec)
-                    executor = ClosedLoopExecutor()
-                    task_res = await executor.execute_task(
+                    model_urdf = ws / "install" / "robotic_arm_6dof" / "share" / "robotic_arm_6dof" / "urdf" / "robot.urdf"
+                    world_sdf = ws / "install" / "robotic_arm_6dof" / "share" / "robotic_arm_6dof" / "worlds" / "tabletop_world.sdf"
+                    task_res = await self.task_execution_adapter.execute_task(
                         task_spec_obj,
-                        context={"simulator": "gazebo_harmonic", "task_id": task_id, "workspace_dir": str(ws)},
+                        context={
+                            "simulator": "gazebo_harmonic",
+                            "task_id": task_id,
+                            "workspace_dir": str(ws),
+                            "model_path": str(model_urdf) if model_urdf.is_file() else None,
+                            "world_path": str(world_sdf) if world_sdf.is_file() else None,
+                        },
                         on_event_cb=on_event_cb,
                     )
-                    passed = task_res["success"]
-                    verification_test = task_res["test_result"]
+                    passed = task_res.get("success", False)
+                    verification_test = task_res.get("test_result", verification_test)
+
+                    if not passed:
+                        term_stage = task_res.get("stage", TaskStage.BLOCKED)
+                        emit(term_stage, f"Arm task {term_stage.value}: {task_res.get('error')}", severity="warning", speak=True)
+                        return {
+                            "task_id": task_id,
+                            "stage": term_stage,
+                            "test_result": verification_test,
+                            "workspace_dir": str(ws),
+                            "source_mode": "live",
+                            "runtime_pid": launch.get("pid"),
+                            "error": task_res.get("error"),
+                            "readiness": task_res.get("readiness"),
+                            "observations": task_res.get("observations", []),
+                            "action_results": task_res.get("action_results", []),
+                        }
 
                 if passed:
                     emit(TaskStage.COMPLETED, f"Live sensor samples and payload checks passed for {primary_name} and camera. Phase 3 complete!", severity="success", speak=True)

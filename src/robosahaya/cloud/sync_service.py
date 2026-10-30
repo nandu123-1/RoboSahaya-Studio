@@ -216,11 +216,21 @@ class BatchSyncReport:
     total_considered: int = 0
     newly_synced: int = 0
     already_synced: int = 0
+    partial_models_count: int = 0
     skipped_licence: int = 0
     skipped_source_unavailable: int = 0
     failed: int = 0
+    # Reconciled aggregate asset accounting
+    assets_attempted: int = 0
     assets_uploaded: int = 0
-    assets_verified: int = 0
+    assets_previously_verified: int = 0
+    assets_total_verified: int = 0
+    assets_verified: int = 0  # Alias for assets_total_verified (backwards compatibility)
+    assets_missing_remote: int = 0
+    assets_failed_upload: int = 0
+    assets_remaining: int = 0
+    # Detailed partial models
+    partial_models: Dict[str, str] = field(default_factory=dict)
     results: Dict[str, SyncResult] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -230,31 +240,54 @@ class BatchSyncReport:
             "total_considered": self.total_considered,
             "newly_synced": self.newly_synced,
             "already_synced": self.already_synced,
+            "partial_models_count": self.partial_models_count,
             "skipped_licence": self.skipped_licence,
             "skipped_source_unavailable": self.skipped_source_unavailable,
             "failed": self.failed,
+            "assets_attempted": self.assets_attempted,
             "assets_uploaded": self.assets_uploaded,
+            "assets_previously_verified": self.assets_previously_verified,
+            "assets_total_verified": self.assets_total_verified,
             "assets_verified": self.assets_verified,
+            "assets_missing_remote": self.assets_missing_remote,
+            "assets_failed_upload": self.assets_failed_upload,
+            "assets_remaining": self.assets_remaining,
+            "partial_models": self.partial_models,
             "results": {k: v.to_dict() for k, v in self.results.items()},
         }
 
     def summary_markdown(self) -> str:
         lines = [
-            f"### ☁️ Bulk Synchronization Report ({self.completed_at})",
+            f"### ☁️ Bulk Synchronization Report ({self.completed_at or 'In Progress'})",
             f"- **Models Considered:** `{self.total_considered}`",
-            f"- **Newly Synchronized:** `{self.newly_synced}`",
-            f"- **Already Synced (Idempotent):** `{self.already_synced}`",
-            f"- **Assets Uploaded:** `{self.assets_uploaded}`",
-            f"- **Assets Verified in Object Storage:** `{self.assets_verified}`",
+            f"- **Fully Synchronized Models:** `{self.newly_synced + self.already_synced}` (`{self.newly_synced}` newly synced, `{self.already_synced}` already synced)",
+            f"- **Partially Synchronized Models:** `{self.partial_models_count}`",
             f"- **Skipped (Licence Restricted):** `{self.skipped_licence}`",
             f"- **Skipped (Source Unavailable / Not Cached):** `{self.skipped_source_unavailable}`",
-            f"- **Failed / Incomplete:** `{self.failed}`",
+            f"- **Failed / Incomplete Models:** `{self.failed}`",
+            "",
+            "#### 📊 Aggregate Asset Accounting",
+            f"- **Assets Attempted:** `{self.assets_attempted}`",
+            f"- **Assets Uploaded in this Run:** `{self.assets_uploaded}`",
+            f"- **Assets Already Present & Verified:** `{self.assets_previously_verified}`",
+            f"- **Total Verified Remote Assets:** `{self.assets_total_verified}`",
+            f"- **Assets Missing Remotely:** `{self.assets_missing_remote}`",
+            f"- **Assets Failed to Upload:** `{self.assets_failed_upload}`",
+            f"- **Assets Remaining to Synchronize:** `{self.assets_remaining}`",
+        ]
+        if self.partial_models:
+            lines.append("")
+            lines.append("#### ⚠️ Partial Robot Models")
+            for rid, detail in sorted(self.partial_models.items()):
+                lines.append(f"- **{rid}:** {detail}")
+
+        lines.extend([
             "",
             "| Robot | Result Status | Uploaded | Verified | Duration | Notes |",
             "|---|---|---|---|---|---|",
-        ]
+        ])
         for rid, r in sorted(self.results.items()):
-            icon = "✅" if r.success else "⚠️" if r.status in (CloudSyncStatus.SOURCE_AVAILABLE, CloudSyncStatus.LICENCE_BLOCKED) else "🔴"
+            icon = "✅" if r.success else "⚠️" if r.status in (CloudSyncStatus.SOURCE_AVAILABLE, CloudSyncStatus.LICENCE_BLOCKED, CloudSyncStatus.REMOTE_ASSET_MISSING) else "🔴"
             dur = f"{r.duration_seconds:.1f}s"
             lines.append(f"| `{rid}` | {icon} `{r.status.value}` | `{r.assets_uploaded}` | `{r.assets_verified}` | {dur} | {r.message} |")
         return "\n".join(lines)
@@ -385,7 +418,7 @@ class RobotCatalogueSyncService:
             "ur5e": (rd_base / "ur_description", "urdf/ur.urdf.xacro"),
             "ur3e": (rd_base / "ur_description", "urdf/ur.urdf.xacro"),
             "ur10e": (rd_base / "ur_description", "urdf/ur.urdf.xacro"),
-            "unitree_go1": (rd_base / "unitree_ros" / "robots" / "go1_description", "urdf/go1_description.urdf"),
+            "unitree_go1": (rd_base / "unitree_ros" / "robots" / "go1_description", "urdf/go1.urdf"),
             "unitree_g1": (rd_base / "unitree_ros" / "robots" / "g1_description", "g1.urdf"),
             "unitree_h1": (rd_base / "unitree_ros" / "robots" / "h1_description", "h1.urdf"),
             "unitree_z1": (rd_base / "unitree_ros" / "robots" / "z1_description", "z1_description.urdf"),
@@ -396,7 +429,16 @@ class RobotCatalogueSyncService:
         if robot_id in known_dirs:
             p_dir, rel_entry = known_dirs[robot_id]
             if p_dir.is_dir():
-                return p_dir, p_dir / rel_entry
+                target_entry = p_dir / rel_entry
+                if not target_entry.exists():
+                    for cand in (p_dir / "urdf").glob("*.urdf"):
+                        target_entry = cand
+                        break
+                    if not target_entry.exists():
+                        for cand in p_dir.rglob("*.urdf"):
+                            target_entry = cand
+                            break
+                return p_dir, target_entry if target_entry.exists() else None
 
         # 4. Check robosahaya cache
         robo_cache = self.cache_base / "robosahaya" / "robot_models" / robot_id
@@ -462,18 +504,20 @@ class RobotCatalogueSyncService:
             rel = str(p.relative_to(base_dir))
             suffix = p.suffix.lower()
 
-            if suffix in (".urdf", ".xacro", ".mjcf", ".xml", ".srdf", ".sdf"):
+            if p.name == "manifest.json":
+                atype = "manifest"
+            elif suffix in (".urdf", ".xacro", ".mjcf", ".xml", ".srdf", ".sdf"):
                 atype = "description"
             elif suffix in (".stl", ".dae", ".obj", ".ply"):
                 atype = "mesh"
             elif suffix in (".png", ".jpg", ".jpeg", ".tga", ".bmp"):
                 atype = "texture"
-            elif suffix in (".yaml", ".yml", ".json", ".config", ".xml"):
+            elif suffix in (".yaml", ".yml", ".json", ".config", ".rviz", ".ini", ".toml", ".conf"):
                 atype = "config"
-            elif suffix in (".py", ".sh"):
+            elif suffix in (".py", ".sh", ".bash", ".launch"):
                 atype = "script"
             else:
-                atype = "asset"
+                atype = "config"
 
             size = p.stat().st_size
             sha = ""
@@ -499,11 +543,10 @@ class RobotCatalogueSyncService:
         start_time = datetime.now(timezone.utc).isoformat()
         items: Dict[str, RobotSyncInventoryItem] = {}
 
-        # 1. Collect canonical models
+        # 1. Collect canonical models from RobotModelCatalog (includes all 175 seeded & discovered models)
         canonical_map: Dict[str, Dict[str, Any]] = {}
 
-        # From _SEEDED_MODELS (30 models)
-        for m in _SEEDED_MODELS:
+        for m in self.catalog.list_models(include_discovered=True):
             canonical_map[m.id] = {
                 "id": m.id,
                 "display_name": m.display_name,
@@ -511,11 +554,11 @@ class RobotCatalogueSyncService:
                 "license": m.license,
                 "formats": m.formats,
                 "module": m.description_module,
-                "template_id": m.runtime_template_id,
+                "template_id": getattr(m, "runtime_template_id", None),
                 "notes": m.notes,
             }
 
-        # From RobotRegistry (8 models)
+        # Merge from RobotRegistry (active runtime templates, etc.)
         for reg_m in self.registry.list_models():
             if reg_m.id not in canonical_map:
                 canonical_map[reg_m.id] = {
@@ -525,12 +568,17 @@ class RobotCatalogueSyncService:
                     "license": reg_m.license,
                     "formats": reg_m.formats,
                     "module": reg_m.description_module,
-                    "template_id": reg_m.runtime_template_id,
+                    "template_id": getattr(reg_m, "runtime_template_id", None),
                     "notes": reg_m.notes,
                 }
+            elif getattr(reg_m, "runtime_template_id", None):
+                canonical_map[reg_m.id]["template_id"] = reg_m.runtime_template_id
 
-        # From Supabase cloud database (with pagination)
+        # Batch fetch cloud models, versions, and asset counts in 2-3 queries instead of 175 sequential queries
         cloud_models_by_id: Dict[str, CloudModelRecord] = {}
+        cloud_versions_by_model: Dict[str, CloudVersionRecord] = {}
+        cloud_asset_counts_by_ver: Dict[str, int] = {}
+
         if self.catalogue.is_connected():
             try:
                 for cm in self.catalogue.list_models():
@@ -546,8 +594,15 @@ class RobotCatalogueSyncService:
                             "template_id": None,
                             "notes": cm.description,
                         }
+
+                # Batch query versions
+                for cv in self.catalogue.list_all_versions():
+                    cloud_versions_by_model[cv.robot_model_id] = cv
+
+                # Batch query asset counts
+                cloud_asset_counts_by_ver = self.catalogue.get_asset_counts()
             except Exception as e:
-                logger.warning("Error fetching cloud models during inventory: %s", str(e))
+                logger.warning("Error fetching cloud data during inventory: %s", str(e))
 
         # 2. Evaluate each canonical robot
         for rid, meta in canonical_map.items():
@@ -565,9 +620,10 @@ class RobotCatalogueSyncService:
 
             # Check cloud database
             cloud_model_exists = rid in cloud_models_by_id
-            cloud_ver_exists = False
-            cloud_assets_count = 0
-            if cloud_model_exists and self.catalogue.is_connected():
+            cloud_ver_exists = (rid in cloud_versions_by_model)
+            cloud_assets_count = cloud_asset_counts_by_ver.get(version_id, 0)
+            if not cloud_ver_exists and cloud_model_exists and not cloud_versions_by_model:
+                # Fallback if list_all_versions was empty
                 try:
                     c_ver = self.catalogue.get_version(rid, version)
                     cloud_ver_exists = (c_ver is not None)
@@ -587,9 +643,14 @@ class RobotCatalogueSyncService:
                 label = "🔒 Licence Restricted"
                 notes = f"Redistribution restricted by '{detected_lic}'; metadata catalogued, physical files not mirrored."
             elif cloud_assets_count > 0 and local_count > 0:
-                status = CloudSyncStatus.SYNCED
-                label = "☁️ Synced"
-                notes = f"All {cloud_assets_count} assets synchronized to Supabase bucket 'robot-model-packages'."
+                if cloud_assets_count >= local_count:
+                    status = CloudSyncStatus.SYNCED
+                    label = "☁️ Synced"
+                    notes = f"All {cloud_assets_count} assets synchronized to Supabase bucket 'robot-model-packages'."
+                else:
+                    status = CloudSyncStatus.REMOTE_ASSET_MISSING
+                    label = "⚠️ Remote Assets Missing"
+                    notes = f"Partial remote sync: {cloud_assets_count}/{local_count} assets registered in cloud ({local_count - cloud_assets_count} missing)."
             elif local_count > 0 and cloud_assets_count == 0:
                 if cloud_ver_exists:
                     status = CloudSyncStatus.REMOTE_ASSET_MISSING
@@ -782,7 +843,9 @@ class RobotCatalogueSyncService:
             need_upload = force_reupload
             if not need_upload:
                 rem_info = self.storage.check_object(key)
-                if not rem_info.get("exists") or rem_info.get("size", 0) != a.size_bytes:
+                if not rem_info.get("exists"):
+                    need_upload = True
+                elif rem_info.get("size", 0) != a.size_bytes and rem_info.get("content_encoding") != "gzip":
                     need_upload = True
 
             if need_upload:
@@ -795,7 +858,7 @@ class RobotCatalogueSyncService:
 
             # Check remote object exists
             rem_check = self.storage.check_object(key)
-            if rem_check.get("exists"):
+            if rem_check.get("exists") and (rem_check.get("size", 0) == a.size_bytes or rem_check.get("content_encoding") == "gzip"):
                 verified_count += 1
 
             # Register asset row in robot_model_assets
@@ -878,14 +941,22 @@ class RobotCatalogueSyncService:
         dry_run: bool = False,
         only_cached: bool = True,
         force_reupload: bool = False,
+        batch_size: Optional[int] = None,
+        offset: int = 0,
         on_progress: Optional[Callable] = None,
         progress_callback: Optional[Callable] = None,
     ) -> BatchSyncReport:
         """Process bulk synchronization for all registered and eligible robot models."""
         started_at = datetime.now(timezone.utc).isoformat()
         inv = self.build_inventory(force_refresh=True)
-        items = list(inv.items.values())
+        all_items = list(inv.items.values())
         progress_fn = on_progress or progress_callback
+
+        # Support bounded, resumable batch execution
+        if batch_size is not None and batch_size > 0:
+            items = all_items[offset : offset + batch_size]
+        else:
+            items = all_items[offset:] if offset > 0 else all_items
 
         report = BatchSyncReport(
             started_at=started_at,
@@ -929,30 +1000,57 @@ class RobotCatalogueSyncService:
             # If already synced and not forcing reupload: verify and record
             if item.sync_status == CloudSyncStatus.SYNCED and not force_reupload and not dry_run:
                 report.already_synced += 1
+                count = item.cloud_assets_count or item.local_files_count
+                report.assets_attempted += count
+                report.assets_previously_verified += count
+                report.assets_total_verified += count
+                report.assets_verified += count
                 report.results[rid] = SyncResult(
                     robot_id=rid,
                     success=True,
                     status=CloudSyncStatus.SYNCED,
-                    assets_verified=item.cloud_assets_count,
-                    message=f"Already synchronized ({item.cloud_assets_count} remote assets current).",
+                    assets_verified=count,
+                    message=f"Already synchronized ({count} remote assets current).",
                 )
                 continue
 
             # Run sync
             try:
+                target_assets_count = item.local_files_count
                 res = self.sync_single_robot(
                     robot_id=rid,
                     dry_run=dry_run,
                     force_reupload=force_reupload,
                 )
                 report.results[rid] = res
+
+                model_assets_total = max(target_assets_count, res.assets_uploaded + res.assets_verified, 1 if not res.success else 0)
+                report.assets_attempted += model_assets_total
+
                 if res.success:
                     if res.status == CloudSyncStatus.SYNCED:
                         report.newly_synced += 1
                     report.assets_uploaded += res.assets_uploaded
+                    prev_ver = max(0, res.assets_verified - res.assets_uploaded)
+                    report.assets_previously_verified += prev_ver
+                    report.assets_total_verified += res.assets_verified
                     report.assets_verified += res.assets_verified
                 else:
-                    report.failed += 1
+                    if res.status == CloudSyncStatus.REMOTE_ASSET_MISSING and res.assets_verified > 0:
+                        report.partial_models_count += 1
+                        missing = max(0, model_assets_total - res.assets_verified)
+                        report.partial_models[rid] = f"{res.assets_verified}/{model_assets_total} verified, {missing} missing"
+                        report.assets_uploaded += res.assets_uploaded
+                        prev_ver = max(0, res.assets_verified - res.assets_uploaded)
+                        report.assets_previously_verified += prev_ver
+                        report.assets_total_verified += res.assets_verified
+                        report.assets_verified += res.assets_verified
+                        report.assets_missing_remote += missing
+                        report.assets_remaining += missing
+                    else:
+                        report.failed += 1
+                        report.assets_failed_upload += model_assets_total
+                        report.assets_remaining += model_assets_total
             except Exception as e:
                 logger.error("Exception synchronizing '%s': %s", rid, str(e))
                 report.failed += 1
@@ -997,7 +1095,10 @@ class RobotCatalogueSyncService:
                 if not info.get("exists"):
                     report.missing_assets.append(a.object_storage_key)
                     all_ok = False
-                elif a.size_bytes > 0 and info.get("size", 0) != a.size_bytes:
+                elif a.size_bytes > 0 and info.get("size", 0) != a.size_bytes and info.get("content_encoding") != "gzip":
+                    report.corrupted_assets.append(a.object_storage_key)
+                    all_ok = False
+                elif a.sha256 and info.get("sha256") and info.get("sha256") != a.sha256:
                     report.corrupted_assets.append(a.object_storage_key)
                     all_ok = False
                 else:

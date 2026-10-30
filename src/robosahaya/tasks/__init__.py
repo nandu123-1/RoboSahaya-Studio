@@ -5,12 +5,23 @@ and evidence-based verification across registered robots and simulator backends.
 """
 from __future__ import annotations
 
-from .specification import (
+from .contracts import (
     ActionStep,
+    ActionResult,
+    ExecutionObservation,
+    ObservationRecord,
     PlacementPredicate,
+    SkillAction,
+    SkillResult,
+    SkillStatus,
+    SimulatorTaskController,
+    TaskExecutionState,
     TaskSpecification,
     TaskType,
     VerificationCondition,
+    VerificationResult,
+    VerificationVerdict,
+    compute_task_fingerprint,
 )
 from .capabilities import (
     CapabilityType,
@@ -25,8 +36,6 @@ from .scene import (
 from .skills import (
     BaseSkill,
     SkillRegistry,
-    SkillResult,
-    SkillStatus,
     get_skill_registry,
 )
 from .interpreter import (
@@ -35,30 +44,39 @@ from .interpreter import (
 )
 from .executor import (
     ClosedLoopExecutor,
-    ExecutionObservation,
-    TaskExecutionState,
 )
 
 __all__ = [
+    # Contracts
     "ActionStep",
+    "ActionResult",
+    "ExecutionObservation",
+    "ObservationRecord",
     "PlacementPredicate",
+    "SkillAction",
+    "SkillResult",
+    "SkillStatus",
+    "SimulatorTaskController",
+    "TaskExecutionState",
     "TaskSpecification",
     "TaskType",
     "VerificationCondition",
+    "VerificationResult",
+    "VerificationVerdict",
+    "compute_task_fingerprint",
+    # Capabilities & Scene
     "CapabilityType",
     "RobotCapability",
     "RobotCapabilityResolver",
     "SceneEntity",
     "WorldScene",
     "get_world_scene",
+    # Skills
     "BaseSkill",
     "SkillRegistry",
-    "SkillResult",
-    "SkillStatus",
     "get_skill_registry",
+    # Interpreter & Executor
     "TaskInterpreter",
     "get_task_interpreter",
     "ClosedLoopExecutor",
-    "ExecutionObservation",
-    "TaskExecutionState",
 ]
