@@ -562,12 +562,17 @@ class TaskInterpreter:
 
         # 5. Legged Locomotion / Posture Grounding
         elif task_type == TaskType.LEGGED_LOCOMOTION:
-            if "stand" in q_lower:
-                extra_params["action_subtype"] = "stand_sit_posture"
-                extra_params["posture"] = "stand"
+            has_motion = any(w in q_lower for w in ("walk", "trot", "step", "forward", "turn", "run", "gait"))
+            has_posture = any(p in q_lower for p in ("stand", "sit", "lie", "posture"))
+            has_stop = any(s in q_lower for s in ("stop", "halt"))
+            if has_motion and (has_posture or has_stop):
+                extra_params["action_subtype"] = "compound_legged"
             elif "sit" in q_lower:
                 extra_params["action_subtype"] = "stand_sit_posture"
                 extra_params["posture"] = "sit"
+            elif "stand" in q_lower:
+                extra_params["action_subtype"] = "stand_sit_posture"
+                extra_params["posture"] = "stand"
             else:
                 extra_params["action_subtype"] = "legged_gait"
 
@@ -1098,7 +1103,47 @@ class TaskInterpreter:
         elif task_type == TaskType.LEGGED_LOCOMOTION:
             subtype = extra_params.get("action_subtype", "stand_sit_posture")
             dur = float(extra_params.get("duration_sec", 1.0))
-            if subtype == "stand_sit_posture":
+            if subtype == "compound_legged":
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="stand_sit_posture",
+                        description="Transition quadruped to standing posture",
+                        parameters={"posture": "stand", "duration_sec": 0.8},
+                        preconditions=["model_physics_initialized", "quadruped_ready"],
+                        expected_observation={"stable": True},
+                        timeout_sec=5.0,
+                        is_critical=True,
+                    ),
+                    SkillAction(
+                        step_index=2,
+                        skill_id="legged_gait",
+                        description="Walk/trot quadruped forward",
+                        parameters={"gait": "trot", "speed_m_s": 0.4, "duration_sec": 1.2},
+                        preconditions=["model_physics_initialized", "quadruped_ready"],
+                        expected_observation={"motion_verified": True},
+                        timeout_sec=6.0,
+                        is_critical=True,
+                    ),
+                    SkillAction(
+                        step_index=3,
+                        skill_id="stand_sit_posture",
+                        description="Halt gait and stabilize standing posture",
+                        parameters={"posture": "stand", "duration_sec": 0.5},
+                        preconditions=["model_physics_initialized", "quadruped_ready"],
+                        expected_observation={"stable": True},
+                        timeout_sec=4.0,
+                        is_critical=True,
+                    ),
+                ]
+                conditions.append(VerificationCondition(
+                    name="Quadruped Forward Locomotion & Stability",
+                    metric="motion_verified",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
+            elif subtype == "stand_sit_posture":
                 posture = extra_params.get("posture", "stand")
                 steps = [
                     SkillAction(

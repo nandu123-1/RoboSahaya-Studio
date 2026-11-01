@@ -220,6 +220,7 @@ class PerceptionObservation(BaseModel):
     confidence: float = 1.0
     is_occluded: bool = False
     in_fov: bool = True
+    is_stale: bool = False
     error_reason: Optional[str] = None
     sensor_telemetry: Dict[str, Any] = Field(default_factory=dict)
 
@@ -242,6 +243,9 @@ class PerceptionPipeline:
         mujoco_model: Optional[Any] = None,
         mujoco_data: Optional[Any] = None,
         camera_name: Optional[str] = None,
+        sensor_timestamp: Optional[float] = None,
+        sim_time_sec: Optional[float] = None,
+        max_stale_age_sec: float = 0.5,
     ) -> PerceptionObservation:
         """Execute perception detection following the declared observation source.
 
@@ -270,6 +274,23 @@ class PerceptionPipeline:
                 confidence=0.0,
                 error_reason=f"Target object '{query_or_id}' could not be resolved in world scene '{scene.world_id}'.",
             )
+
+        # Check for stale sensor data
+        curr_sim_time = sim_time_sec if sim_time_sec is not None else (float(mujoco_data.time) if mujoco_data is not None else None)
+        if sensor_timestamp is not None and curr_sim_time is not None:
+            age = curr_sim_time - sensor_timestamp
+            if age > max_stale_age_sec:
+                return PerceptionObservation(
+                    success=False,
+                    target_id=entity.id,
+                    target_name=entity.name,
+                    observation_source=source,
+                    estimated_pose_world=entity.pose,
+                    confidence=0.0,
+                    is_stale=True,
+                    error_reason=f"Stale sensor observation: sensor timestamp {sensor_timestamp:.3f}s is older than current simulation time {curr_sim_time:.3f}s by {age:.3f}s (max allowed: {max_stale_age_sec:.3f}s).",
+                    sensor_telemetry={"sensor_timestamp": sensor_timestamp, "sim_time": curr_sim_time, "stale": True, "age_sec": age},
+                )
 
         target_xyz = entity.xyz
 

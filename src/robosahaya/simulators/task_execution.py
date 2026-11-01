@@ -155,8 +155,14 @@ class MujocoTaskExecutionAdapter:
             "rsk", "robot_soccer_kit",
             "franka_panda", "panda", "fr3",
             "ur5", "ur5e", "universal_robots_ur5e",
+            "ur10", "ur10e", "universal_robots_ur10e",
+            "unitree_z1", "z1",
+            "xarm7", "ufactory_xarm7",
             "so_arm100", "so100", "so_arm101", "so101",
             "unitree_go1", "go1", "unitree_go2", "go2",
+            "unitree_b2", "b2",
+            "unitree_g1", "g1",
+            "unitree_h1", "h1",
             "differential_drive", "skydio_x2",
         }
         if robot_id not in supported_robots:
@@ -177,12 +183,12 @@ class MujocoTaskExecutionAdapter:
                 f"MuJoCo wheel controller requires canonical robot_id='rsk'; received {robot_id!r}.",
             )
         if skill_id == "legged_gait":
-            if robot_id not in ("unitree_go1", "go1", "unitree_go2", "go2"):
+            if robot_id not in ("unitree_go1", "go1", "unitree_go2", "go2", "unitree_b2", "b2"):
                 return self._blocked_skill_result(
                     skill_id,
                     f"Quadruped dynamic gait execution requires a verified quadruped model; received {robot_id!r}.",
                 )
-            if robot_id in ("unitree_go2", "go2") and not (
+            if robot_id in ("unitree_go2", "go2", "unitree_b2", "b2") and not (
                 context.get("has_gait_controller")
                 or (isinstance(params, dict) and (params.get("gait") in ("kinematic_trot", "kinematic_walk", "wave_gait") or params.get("controller") == "rhythmic_pd"))
             ):
@@ -2220,6 +2226,21 @@ class MujocoTaskExecutionAdapter:
                 home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/universal_robots_ur5e/ur5e.xml",
                 home / ".cache/robot_descriptions/example-robot-data/robots/ur_description/urdf/ur5_robot.urdf",
             ))
+        elif rid in ("ur10", "ur10e", "universal_robots_ur10e"):
+            candidates.extend((
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/universal_robots_ur10e/scene.xml",
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/universal_robots_ur10e/ur10e.xml",
+            ))
+        elif rid in ("unitree_z1", "z1"):
+            candidates.extend((
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/unitree_z1/scene.xml",
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/unitree_z1/z1.xml",
+            ))
+        elif rid in ("xarm7", "ufactory_xarm7"):
+            candidates.extend((
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/ufactory_xarm7/scene.xml",
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/ufactory_xarm7/xarm7.xml",
+            ))
         elif rid in ("so_arm100", "so100"):
             candidates.append(home / ".cache/robot_descriptions/SO-ARM100/Simulation/SO100/so100.urdf")
         elif rid in ("so_arm101", "so101"):
@@ -2237,19 +2258,30 @@ class MujocoTaskExecutionAdapter:
                 home / ".cache/robosahaya/robot_models/unitree_go2/v1.0.0/urdf/go2_description.urdf",
                 home / ".cache/robot_descriptions/unitree_ros/robots/go2_description/urdf/go2_description.urdf",
             ))
+        elif rid in ("unitree_b2", "b2"):
+            candidates.extend((
+                home / ".cache/robot_descriptions/unitree_ros/robots/b2_description_mujoco/xml/b2.xml",
+                home / ".cache/robot_descriptions/unitree_ros/robots/b2_description_mujoco/xml/scene.xml",
+            ))
+        elif rid in ("unitree_g1", "g1"):
+            candidates.extend((
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/unitree_g1/scene.xml",
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/unitree_g1/g1.xml",
+            ))
+        elif rid in ("unitree_h1", "h1"):
+            candidates.extend((
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/unitree_h1/scene.xml",
+                home / ".cache/robot_descriptions/ability_hand_api/python/ah_simulators/mujoco_xml/unitree_h1/h1.xml",
+            ))
         elif rid in ("skydio_x2", "drone"):
             candidates.append(home / ".cache/robot_descriptions/skydio_x2_description/urdf/skydio_x2.urdf")
         else:
             candidates.extend((
                 home / f".cache/robosahaya/robot_models/{rid}/v1.0.0/model/scene.xml",
                 home / f".cache/robosahaya/robot_models/{rid}/v1.0.0/urdf/{rid}.urdf",
-                home / ".cache/robot_descriptions/mujoco_menagerie/robot_soccer_kit/scene.xml",
-                home / ".cache/robot_descriptions/mujoco_menagerie/robot_soccer_kit/robot_soccer_kit.xml",
-                home / ".cache/robosahaya/robot_models/rsk/v1.0.0/model/scene.xml",
-                home / ".cache/robosahaya/robot_models/rsk/v1.0.0/model/robot_soccer_kit.xml",
             ))
         base_match = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
-        if base_match and "tabletop" in wid and rid in ("franka_panda", "panda", "fr3", "ur5", "ur5e", "universal_robots_ur5e", "so_arm101", "so101"):
+        if base_match and "tabletop" in wid and rid in ("franka_panda", "panda", "fr3", "ur5", "ur5e", "universal_robots_ur5e", "ur10", "ur10e", "so_arm101", "so101", "unitree_z1", "xarm7"):
             try:
                 return _get_or_create_tabletop_scene(base_match)
             except Exception:
