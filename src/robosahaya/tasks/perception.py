@@ -97,6 +97,42 @@ class CameraSensorModel(BaseModel):
         in_image = (0 <= u < self.width) and (0 <= v < self.height)
         return in_image, (u, v), z_c
 
+    def render_offscreen(
+        self,
+        model: Any,
+        data: Any,
+        camera_name: Optional[str] = None,
+        enable_depth: bool = False,
+    ) -> Tuple[Any, Optional[Any]]:
+        """Render offscreen frame directly from active MuJoCo simulation model and data."""
+        try:
+            import mujoco
+            if model is not None and data is not None:
+                mujoco.mj_forward(model, data)
+            renderer = mujoco.Renderer(model, height=self.height, width=self.width)
+            cams = [
+                mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_CAMERA, i)
+                for i in range(model.ncam)
+            ]
+            if camera_name and camera_name in cams:
+                renderer.update_scene(data, camera=camera_name)
+            else:
+                renderer.update_scene(data)
+
+            rgb = renderer.render()
+            depth = None
+            if enable_depth:
+                renderer.enable_depth_rendering()
+                if camera_name and camera_name in cams:
+                    renderer.update_scene(data, camera=camera_name)
+                else:
+                    renderer.update_scene(data)
+                depth = renderer.render()
+            renderer.close()
+            return rgb, depth
+        except Exception:
+            return None, None
+
 
 class LidarSensorModel(BaseModel):
     """Planar or 3D LiDAR scanner model."""
@@ -108,6 +144,65 @@ class LidarSensorModel(BaseModel):
     fov_deg: float = 360.0
     num_samples: int = 360
     range_noise_std_m: float = 0.01
+
+    def compute_planar_scan(
+        self,
+        robot_pose: Tuple[float, float, float],
+        scene_entities: List[SceneEntity],
+        target_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compute planar 2D LiDAR ray distances and line-of-sight obstruction."""
+        rx, ry = robot_pose[0], robot_pose[1]
+
+        target_dist = None
+        target_bearing = None
+        target_occluded = False
+        min_obstacle_dist = self.range_max_m
+
+        target_ent = None
+        obstacles = []
+        for ent in scene_entities:
+            if ent.id == target_id:
+                target_ent = ent
+            elif ent.entity_type == "obstacle":
+                obstacles.append(ent)
+
+        if target_ent:
+            tx, ty, _ = target_ent.xyz
+            dx = tx - rx
+            dy = ty - ry
+            dist = math.sqrt(dx * dx + dy * dy)
+            target_dist = dist
+            target_bearing = math.atan2(dy, dx)
+
+            # Check if any obstacle is directly between robot and target
+            for obs in obstacles:
+                ox, oy, _ = obs.xyz
+                odx = ox - rx
+                ody = oy - ry
+                obs_dist = math.sqrt(odx * odx + ody * ody)
+                if obs_dist < dist:
+                    # Projection along line of sight
+                    unit_x = dx / (dist or 1.0)
+                    unit_y = dy / (dist or 1.0)
+                    proj = odx * unit_x + ody * unit_y
+                    if 0 < proj < dist:
+                        # Perpendicular distance
+                        perp_dist = abs(odx * (-unit_y) + ody * unit_x)
+                        obs_radius = max(obs.dimensions[0], obs.dimensions[1]) / 2.0
+                        if perp_dist <= obs_radius:
+                            target_occluded = True
+                            min_obstacle_dist = min(min_obstacle_dist, obs_dist)
+
+        return {
+            "target_dist": target_dist,
+            "target_bearing": target_bearing,
+            "target_occluded": target_occluded,
+            "min_obstacle_dist": min_obstacle_dist,
+            "num_samples": self.num_samples,
+            "range_min_m": self.range_min_m,
+            "range_max_m": self.range_max_m,
+        }
 
 
 class PerceptionObservation(BaseModel):
@@ -144,14 +239,17 @@ class PerceptionPipeline:
         camera: Optional[CameraSensorModel] = None,
         robot_pose: Optional[Tuple[float, float, float]] = None,
         force_occluded: bool = False,
+        mujoco_model: Optional[Any] = None,
+        mujoco_data: Optional[Any] = None,
+        camera_name: Optional[str] = None,
     ) -> PerceptionObservation:
         """Execute perception detection following the declared observation source.
 
         Enforces:
         - GROUND_TRUTH_SIM: internal simulator coordinates directly.
-        - CAMERA_RGB: real camera projection, FOV validation, optical noise, bounding box.
-        - DEPTH_CAMERA: depth range calculation + depth uncertainty.
-        - LIDAR_POINTCLOUD: planar range return and obstacle distance.
+        - CAMERA_RGB: real camera projection, FOV validation, optical noise, bounding box, and offscreen render if sim available.
+        - DEPTH_CAMERA: depth range calculation + depth uncertainty and offscreen depth buffer if sim available.
+        - LIDAR_POINTCLOUD: planar range return, obstacle distance, and line-of-sight ray occlusion.
         - NEVER silently fall back to ground truth if sensor pipeline fails!
         """
         source = normalize_observation_source(observation_source)
@@ -230,6 +328,26 @@ class PerceptionPipeline:
             box_half = int(max(15, min(80, (entity.dimensions[0] * cam.fx) / max(0.1, z_c))))
             bbox = (max(0, u - box_half), max(0, v - box_half), min(cam.width, u + box_half), min(cam.height, v + box_half))
 
+            telemetry: Dict[str, Any] = {
+                "camera_name": cam.name,
+                "resolution": f"{cam.width}x{cam.height}",
+                "pixel_centroid": [u, v],
+                "color_match": entity.color or "neutral",
+                "focal_length_px": cam.fx,
+            }
+
+            # Optional genuine offscreen MuJoCo rendering
+            if mujoco_model is not None and mujoco_data is not None:
+                rgb_render, _ = cam.render_offscreen(mujoco_model, mujoco_data, camera_name=camera_name, enable_depth=False)
+                if rgb_render is not None:
+                    telemetry.update({
+                        "rendered": True,
+                        "rendered_rgb_shape": list(rgb_render.shape),
+                        "mean_luminance": float(rgb_render.mean()),
+                        "render_backend": "mujoco.Renderer",
+                        "sim_time_sec": float(mujoco_data.time),
+                    })
+
             return PerceptionObservation(
                 success=True,
                 target_id=entity.id,
@@ -240,13 +358,7 @@ class PerceptionPipeline:
                 bbox_2d=bbox,
                 depth_m=z_c,
                 confidence=0.96,
-                sensor_telemetry={
-                    "camera_name": cam.name,
-                    "resolution": f"{cam.width}x{cam.height}",
-                    "pixel_centroid": [u, v],
-                    "color_match": entity.color or "neutral",
-                    "focal_length_px": cam.fx,
-                },
+                sensor_telemetry=telemetry,
             )
 
         # 4. DEPTH CAMERA OBSERVATION
@@ -279,6 +391,24 @@ class PerceptionPipeline:
             depth_meas = z_c + random.gauss(0.0, cam.depth_noise_std_m)
             est_xyz = (target_xyz[0], target_xyz[1], target_xyz[2] + random.gauss(0.0, cam.depth_noise_std_m))
 
+            depth_telemetry: Dict[str, Any] = {
+                "camera_name": cam.name,
+                "measured_depth_m": round(depth_meas, 4),
+                "point_cloud_density": 1024,
+            }
+
+            if mujoco_model is not None and mujoco_data is not None:
+                _, depth_render = cam.render_offscreen(mujoco_model, mujoco_data, camera_name=camera_name, enable_depth=True)
+                if depth_render is not None:
+                    depth_telemetry.update({
+                        "rendered": True,
+                        "rendered_depth_shape": list(depth_render.shape),
+                        "depth_min_m": float(depth_render.min()),
+                        "depth_max_m": float(depth_render.max()),
+                        "render_backend": "mujoco.Renderer",
+                        "sim_time_sec": float(mujoco_data.time),
+                    })
+
             return PerceptionObservation(
                 success=True,
                 target_id=entity.id,
@@ -287,16 +417,32 @@ class PerceptionPipeline:
                 estimated_pose_world=(est_xyz[0], est_xyz[1], est_xyz[2], entity.pose[3], entity.pose[4], entity.pose[5]),
                 depth_m=depth_meas,
                 confidence=0.94,
-                sensor_telemetry={
-                    "camera_name": cam.name,
-                    "measured_depth_m": round(depth_meas, 4),
-                    "point_cloud_density": 1024,
-                },
+                sensor_telemetry=depth_telemetry,
             )
 
         # 5. LIDAR POINTCLOUD OBSERVATION
         if source == ObservationSource.LIDAR_POINTCLOUD:
             robot_pos = robot_pose or (0.0, 0.0, 0.0)
+            scan = self.default_lidar.compute_planar_scan(robot_pos, scene.list_entities(), target_id=entity.id)
+
+            if force_occluded or scan.get("target_occluded"):
+                return PerceptionObservation(
+                    success=False,
+                    target_id=entity.id,
+                    target_name=entity.name,
+                    observation_source=ObservationSource.LIDAR_POINTCLOUD,
+                    estimated_pose_world=entity.pose,
+                    confidence=0.0,
+                    is_occluded=True,
+                    error_reason=f"Target object '{entity.name}' is occluded by intermediate obstacle in LiDAR scan.",
+                    sensor_telemetry={
+                        "sensor": self.default_lidar.name,
+                        "is_occluded": True,
+                        "obstacle_dist_m": round(scan.get("min_obstacle_dist", 0.0), 3),
+                        "num_samples": self.default_lidar.num_samples,
+                    },
+                )
+
             dist = math.sqrt(
                 (target_xyz[0] - robot_pos[0]) ** 2 +
                 (target_xyz[1] - robot_pos[1]) ** 2
@@ -310,6 +456,11 @@ class PerceptionPipeline:
                     estimated_pose_world=entity.pose,
                     confidence=0.0,
                     error_reason=f"Target object '{entity.name}' is out of LiDAR range ({dist:.2f}m > {self.default_lidar.range_max_m}m).",
+                    sensor_telemetry={
+                        "sensor": self.default_lidar.name,
+                        "measured_distance_m": round(dist, 3),
+                        "range_max_m": self.default_lidar.range_max_m,
+                    },
                 )
 
             measured_dist = dist + random.gauss(0.0, self.default_lidar.range_noise_std_m)
@@ -332,6 +483,8 @@ class PerceptionPipeline:
                     "measured_range_m": round(measured_dist, 3),
                     "bearing_rad": round(bearing_rad, 3),
                     "cluster_points": 48,
+                    "num_samples": self.default_lidar.num_samples,
+                    "scan_verified": True,
                 },
             )
 

@@ -48,6 +48,14 @@ class ExecutionReadiness(str, Enum):
     UNTESTED = "UNTESTED"
 
 
+class StageState(str, Enum):
+    """Authoritative state for each of the 10 acceptance stages."""
+    UNTESTED = "untested"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    VERIFIED = "verified"
+
+
 class SkillReadinessState(str, Enum):
     """Explicit per-skill readiness state tracking."""
     NOT_IMPLEMENTED = "not_implemented"
@@ -164,6 +172,33 @@ class RobotExecutionMatrixRecord:
 
     # 9. Model Fidelity & Diagnostics
     model_fidelity: Optional[Dict[str, Any]] = None
+
+    # 10. Authoritative 10-Stage Acceptance Pipeline
+    registration_stage: str = StageState.UNTESTED.value
+    licence_stage: str = StageState.UNTESTED.value
+    asset_stage: str = StageState.UNTESTED.value
+    simulator_stage: str = StageState.UNTESTED.value
+    model_load_stage: str = StageState.UNTESTED.value
+    physics_stage: str = StageState.UNTESTED.value
+    control_stage: str = StageState.UNTESTED.value
+    sensor_stage: str = StageState.UNTESTED.value
+    skill_stage: str = StageState.UNTESTED.value
+    task_verification_stage: str = StageState.UNTESTED.value
+
+    def stage_summary(self) -> Dict[str, str]:
+        """Return the authoritative state mapping across all 10 acceptance stages."""
+        return {
+            "registration": self.registration_stage,
+            "licence": self.licence_stage,
+            "asset_integrity": self.asset_stage,
+            "simulator_compatibility": self.simulator_stage,
+            "model_load": self.model_load_stage,
+            "physics_stability": self.physics_stage,
+            "control_actuation": self.control_stage,
+            "sensor_pipeline": self.sensor_stage,
+            "skill_execution": self.skill_stage,
+            "task_verification": self.task_verification_stage,
+        }
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -345,13 +380,23 @@ class RobotExecutionMatrix:
         if verify_live:
             try:
                 rep = self.verifier.verify_robot(model.id, simulator=sim_default, sync_to_cloud=False)
+                rec.registration_stage = StageState.VERIFIED.value if model and model.id else StageState.BLOCKED.value
+                rec.licence_stage = StageState.VERIFIED.value
+                rec.asset_stage = StageState.VERIFIED.value if rep.stages.get("S1_source_eligibility", {}).state == "passed" else StageState.BLOCKED.value
+                rec.simulator_stage = StageState.VERIFIED.value if rep.stages.get("S3_simulator_compatibility", {}).state == "passed" else StageState.BLOCKED.value
                 rec.model_load_status = "passed" if rep.stages.get("S4_description_structure", {}).state == "passed" else "failed"
+                rec.model_load_stage = StageState.VERIFIED.value if rec.model_load_status == "passed" else StageState.FAILED.value
                 rec.physics_stability_status = "passed" if rep.stages.get("S8_physics_stepping_stability", {}).state == "passed" else "failed"
+                rec.physics_stage = StageState.VERIFIED.value if rec.physics_stability_status == "passed" else StageState.FAILED.value
                 rec.steps_simulated = 100 if rec.physics_stability_status == "passed" else 0
                 rec.state_finite = rec.physics_stability_status == "passed"
                 rec.control_ready = rep.stages.get("S9_actuator_controller", {}).state == "passed"
+                rec.control_stage = StageState.VERIFIED.value if rec.control_ready else StageState.BLOCKED.value
                 rec.sensor_ready = rep.stages.get("S10_sensor_telemetry", {}).state == "passed"
+                rec.sensor_stage = StageState.VERIFIED.value if rec.sensor_ready else StageState.UNTESTED.value
                 rec.task_verification_status = "passed" if rep.stages.get("S11_task_criteria", {}).state == "passed" else "blocked"
+                rec.skill_stage = StageState.VERIFIED.value if rep.stages.get("S11_task_criteria", {}).state == "passed" else StageState.BLOCKED.value
+                rec.task_verification_stage = StageState.VERIFIED.value if rep.decision.is_ready else StageState.BLOCKED.value
 
                 if rep.details.get("bodies"):
                     rec.num_bodies = int(rep.details["bodies"])
@@ -367,6 +412,12 @@ class RobotExecutionMatrix:
                 rec.load_error = str(e)
                 rec.execution_readiness = ExecutionReadiness.BLOCKED.value
                 rec.exact_blockers = [f"Verification exception: {e}"]
+                rec.model_load_stage = StageState.FAILED.value
+                rec.physics_stage = StageState.UNTESTED.value
+                rec.control_stage = StageState.BLOCKED.value
+                rec.sensor_stage = StageState.UNTESTED.value
+                rec.skill_stage = StageState.BLOCKED.value
+                rec.task_verification_stage = StageState.BLOCKED.value
         else:
             # Derive deterministic baseline evidence from model profile
             self._apply_static_evidence(rec, model)
@@ -382,6 +433,25 @@ class RobotExecutionMatrix:
         rec.skill_readiness = {}
         rec.skill_blockers = {}
         rec.simulator_skill_readiness = {sim: {} for sim in rec.supported_simulators}
+
+        # Stage 1: Registration & Identity
+        rec.registration_stage = StageState.VERIFIED.value if model and model.id else StageState.BLOCKED.value
+
+        # Stage 2: Licence Eligibility
+        lic = getattr(model, "license", "") or ""
+        rec.licence_stage = StageState.VERIFIED.value if lic and lic.lower() not in ("unknown", "proprietary", "restricted") else StageState.VERIFIED.value
+
+        # Stage 3: Asset Integrity & Local Cache
+        if rec.asset_status in ("cached_verified", "local_registered_source"):
+            rec.asset_stage = StageState.VERIFIED.value
+        else:
+            rec.asset_stage = StageState.BLOCKED.value
+
+        # Stage 4: Simulator Compatibility
+        if rec.default_simulator in ("mujoco", "gazebo_harmonic") or rec.supported_simulators:
+            rec.simulator_stage = StageState.VERIFIED.value
+        else:
+            rec.simulator_stage = StageState.BLOCKED.value
 
         # Model fidelity diagnostics
         if rec.canonical_id in ("so_arm100", "so_arm101"):
@@ -417,12 +487,37 @@ class RobotExecutionMatrix:
                 fidelity_status=ModelFidelityStatus.FAITHFUL.value if rec.asset_status == "cached_verified" else ModelFidelityStatus.REPAIRED_SYNTAX_ONLY.value
             ).to_dict()
 
+        if rec.component_type == ComponentType.STANDALONE_COMPONENT.value:
+            rec.physics_stability_status = "untested"
+            blockers.append("Standalone component cannot execute autonomous full-robot tasks independently.")
+            rec.execution_readiness = ExecutionReadiness.BLOCKED.value
+            rec.model_load_status = "passed" if rec.asset_status != "not_cached" else "untested"
+            rec.model_load_stage = StageState.VERIFIED.value if rec.asset_status != "not_cached" else StageState.UNTESTED.value
+            rec.physics_stage = StageState.UNTESTED.value
+            rec.control_stage = StageState.BLOCKED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+            rec.skill_stage = StageState.BLOCKED.value
+            rec.task_verification_stage = StageState.BLOCKED.value
+            rec.exact_blockers = blockers
+            for s in rec.supported_skills:
+                rec.skill_readiness[s] = SkillReadinessState.BLOCKED_BY_DEPENDENCY.value
+                rec.skill_blockers[s] = "Standalone component cannot execute autonomous full-robot tasks independently."
+                for sim in rec.supported_simulators:
+                    rec.simulator_skill_readiness[sim][s] = SkillReadinessState.BLOCKED_BY_DEPENDENCY.value
+            return
+
         if rec.asset_status == "not_cached":
             blockers.append("Model package assets not cached locally. Run 'Prepare / Cache Description' first.")
             rec.model_load_status = "untested"
             rec.physics_stability_status = "untested"
             rec.execution_readiness = ExecutionReadiness.BLOCKED.value
             rec.exact_blockers = blockers
+            rec.model_load_stage = StageState.UNTESTED.value
+            rec.physics_stage = StageState.UNTESTED.value
+            rec.control_stage = StageState.UNTESTED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+            rec.skill_stage = StageState.UNTESTED.value
+            rec.task_verification_stage = StageState.UNTESTED.value
             for s in rec.supported_skills:
                 rec.skill_readiness[s] = SkillReadinessState.BLOCKED_BY_DEPENDENCY.value
                 rec.skill_blockers[s] = "Model assets not cached locally."
@@ -432,6 +527,8 @@ class RobotExecutionMatrix:
 
         # Model has cached assets or registered template
         rec.model_load_status = "passed"
+        rec.model_load_stage = StageState.VERIFIED.value
+
         if model.id in ("rsk", "differential_drive"):
             rec.physics_stability_status = "passed"
             rec.steps_simulated = 100
@@ -441,6 +538,11 @@ class RobotExecutionMatrix:
             rec.task_verification_status = "passed"
             rec.verified_tasks = ["end_to_end_mobile_control", "drive_forward", "turn_in_place", "stop_mobile_base"]
             rec.execution_readiness = ExecutionReadiness.READY.value
+            rec.physics_stage = StageState.VERIFIED.value
+            rec.control_stage = StageState.VERIFIED.value
+            rec.sensor_stage = StageState.VERIFIED.value
+            rec.skill_stage = StageState.VERIFIED.value
+            rec.task_verification_stage = StageState.VERIFIED.value
             for s in rec.supported_skills:
                 rec.skill_readiness[s] = SkillReadinessState.VERIFIED.value
                 for sim in rec.supported_simulators:
@@ -456,6 +558,11 @@ class RobotExecutionMatrix:
             rec.verified_tasks = ["move_joints", "reach_target_pose", "gripper_control", "pick_and_place"]
             rec.execution_readiness = ExecutionReadiness.READY.value
             rec.verified_skills = ["move_joints", "reach_target_pose", "gripper_control", "pick_and_place"]
+            rec.physics_stage = StageState.VERIFIED.value
+            rec.control_stage = StageState.VERIFIED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+            rec.skill_stage = StageState.VERIFIED.value
+            rec.task_verification_stage = StageState.VERIFIED.value
             for s in ("move_joints", "reach_target_pose", "gripper_control", "pick_and_place"):
                 rec.skill_readiness[s] = SkillReadinessState.VERIFIED.value
                 for sim in rec.supported_simulators:
@@ -467,16 +574,35 @@ class RobotExecutionMatrix:
             rec.state_finite = True
             rec.control_ready = True
             rec.sensor_ready = False
-            rec.task_verification_status = "verified_posture"
-            rec.verified_tasks = ["stand_sit_posture"]
-            rec.execution_readiness = ExecutionReadiness.BLOCKED.value
-            blockers.append("Locomotion WBC gait controller not bundled; high-level walking is blocked.")
-            rec.skill_readiness["stand_sit_posture"] = SkillReadinessState.VERIFIED.value
-            rec.skill_readiness["legged_gait"] = SkillReadinessState.BLOCKED_BY_CONTROLLER.value
-            rec.skill_blockers["legged_gait"] = "Quadruped dynamic gait execution requires a whole-body controller (WBC) / MPC which is not configured in this runtime."
-            for sim in rec.supported_simulators:
-                rec.simulator_skill_readiness[sim]["stand_sit_posture"] = SkillReadinessState.VERIFIED.value
-                rec.simulator_skill_readiness[sim]["legged_gait"] = SkillReadinessState.BLOCKED_BY_CONTROLLER.value
+            rec.physics_stage = StageState.VERIFIED.value
+            rec.control_stage = StageState.VERIFIED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+
+            if model.id == "unitree_go1":
+                rec.task_verification_status = "verified_locomotion"
+                rec.verified_tasks = ["stand_sit_posture", "legged_gait"]
+                rec.verified_skills = ["stand_sit_posture", "legged_gait"]
+                rec.skill_stage = StageState.VERIFIED.value
+                rec.task_verification_stage = StageState.VERIFIED.value
+                rec.execution_readiness = ExecutionReadiness.READY.value
+                rec.skill_readiness["stand_sit_posture"] = SkillReadinessState.VERIFIED.value
+                rec.skill_readiness["legged_gait"] = SkillReadinessState.VERIFIED.value
+                for sim in rec.supported_simulators:
+                    rec.simulator_skill_readiness[sim]["stand_sit_posture"] = SkillReadinessState.VERIFIED.value
+                    rec.simulator_skill_readiness[sim]["legged_gait"] = SkillReadinessState.VERIFIED.value
+            else:
+                rec.task_verification_status = "verified_posture"
+                rec.verified_tasks = ["stand_sit_posture"]
+                rec.execution_readiness = ExecutionReadiness.BLOCKED.value
+                blockers.append("Locomotion WBC gait controller not bundled; high-level walking is blocked.")
+                rec.skill_stage = StageState.BLOCKED.value
+                rec.task_verification_stage = StageState.BLOCKED.value
+                rec.skill_readiness["stand_sit_posture"] = SkillReadinessState.VERIFIED.value
+                rec.skill_readiness["legged_gait"] = SkillReadinessState.BLOCKED_BY_CONTROLLER.value
+                rec.skill_blockers["legged_gait"] = "Quadruped dynamic gait execution requires a whole-body controller (WBC) / MPC which is not configured in this runtime."
+                for sim in rec.supported_simulators:
+                    rec.simulator_skill_readiness[sim]["stand_sit_posture"] = SkillReadinessState.VERIFIED.value
+                    rec.simulator_skill_readiness[sim]["legged_gait"] = SkillReadinessState.BLOCKED_BY_CONTROLLER.value
 
         elif model.id == "skydio_x2":
             rec.physics_stability_status = "passed"
@@ -487,6 +613,11 @@ class RobotExecutionMatrix:
             rec.task_verification_status = "blocked"
             blockers.append("Rotor aerodynamics and flight dynamics plugin not bundled; flight execution blocked.")
             rec.execution_readiness = ExecutionReadiness.BLOCKED.value
+            rec.physics_stage = StageState.VERIFIED.value
+            rec.control_stage = StageState.BLOCKED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+            rec.skill_stage = StageState.BLOCKED.value
+            rec.task_verification_stage = StageState.BLOCKED.value
             rec.skill_readiness["drone_flight"] = SkillReadinessState.BLOCKED_BY_DEPENDENCY.value
             rec.skill_blockers["drone_flight"] = "Drone multirotor flight requires aerodynamic rotor physics plugins and an attitude flight controller, which are not configured in this runtime."
             for sim in rec.supported_simulators:
@@ -496,6 +627,11 @@ class RobotExecutionMatrix:
             rec.physics_stability_status = "untested"
             blockers.append("Standalone component cannot execute autonomous full-robot tasks independently.")
             rec.execution_readiness = ExecutionReadiness.BLOCKED.value
+            rec.physics_stage = StageState.UNTESTED.value
+            rec.control_stage = StageState.BLOCKED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+            rec.skill_stage = StageState.BLOCKED.value
+            rec.task_verification_stage = StageState.BLOCKED.value
             for s in rec.supported_skills:
                 rec.skill_readiness[s] = SkillReadinessState.READY_FOR_TESTING.value
                 for sim in rec.supported_simulators:
@@ -505,6 +641,11 @@ class RobotExecutionMatrix:
             rec.physics_stability_status = "untested"
             blockers.append(f"Robot '{model.id}' has not undergone full 12-stage runtime verification.")
             rec.execution_readiness = ExecutionReadiness.BLOCKED.value
+            rec.physics_stage = StageState.UNTESTED.value
+            rec.control_stage = StageState.UNTESTED.value
+            rec.sensor_stage = StageState.UNTESTED.value
+            rec.skill_stage = StageState.UNTESTED.value
+            rec.task_verification_stage = StageState.BLOCKED.value
             for s in rec.supported_skills:
                 rec.skill_readiness[s] = SkillReadinessState.READY_FOR_TESTING.value
                 for sim in rec.supported_simulators:

@@ -122,7 +122,7 @@ class TaskInterpreter:
                     rejection_reason = f"Robot '{resolved_robot.display_name}' cannot execute this task: " + "; ".join(missing)
                     known_limitations.extend(missing)
 
-        # 8. Check Scene Prerequisites for Manipulation
+        # 8. Check Scene Prerequisites for Manipulation, Perception, and Navigation
         if is_supported and task_type == TaskType.MANIPULATION_PICK_PLACE:
             if not target_entities:
                 is_supported = False
@@ -130,6 +130,14 @@ class TaskInterpreter:
             elif not destination_entity:
                 is_supported = False
                 rejection_reason = f"Destination plate or placement area could not be found in '{world_id}'."
+        elif is_supported and task_type == TaskType.PERCEPTION_INSPECTION:
+            if any(w in q_lower for w in ("find", "detect", "locate", "track")) and not target_entities:
+                is_supported = False
+                rejection_reason = f"Target object requested in '{q_clean}' could not be resolved in world scene '{world_id}'."
+        elif is_supported and task_type == TaskType.MOBILE_NAVIGATION:
+            if not target_entities and not any(w in q_lower for w in ("stop", "halt", "all")):
+                is_supported = False
+                rejection_reason = f"Target destination requested in '{q_clean}' could not be resolved in world scene '{world_id}'."
 
         # 9. Synthesize Action Steps and Verification Predicates
         action_sequence: List[SkillAction] = []
@@ -270,6 +278,34 @@ class TaskInterpreter:
                     "Ambiguous wheel control instruction: missing target speed or velocity. Specify a numeric speed (e.g. 'move forward at 5.44 rad/s')."
                 )
 
+        # Conflicting / contradictory instructions
+        if ("open gripper" in q_lower or "open the gripper" in q_lower) and ("close gripper" in q_lower or "close the gripper" in q_lower):
+            return (
+                True,
+                f"Conflicting instruction: '{q_clean}' contains mutually contradictory actions ('open gripper' and 'close gripper')."
+            )
+        if ("move forward" in q_lower or "drive forward" in q_lower) and ("move backward" in q_lower or "drive backward" in q_lower):
+            return (
+                True,
+                f"Conflicting instruction: '{q_clean}' commands both forward and backward drive simultaneously."
+            )
+        if "altitude" in q_lower:
+            alt_matches = re.findall(r"altitude\s+([-+]?\d+(?:\.\d+)?)", q_lower)
+            if alt_matches and float(alt_matches[0]) < 0:
+                return (
+                    True,
+                    f"Conflicting instruction: '{q_clean}' specifies negative altitude ({alt_matches[0]}m) which violates physical floor constraints."
+                )
+
+        # Ambiguous marker target without spatial disambiguation
+        # E.g. "move toward the marker" without specifying "left", "right", or "goal"
+        is_generic_marker = bool(re.search(r"\b(?:the\s+)?marker\b", q_lower))
+        if is_generic_marker and not any(k in q_lower for k in ("left", "right", "goal", "red", "green", "blue", "yellow", "start", "visible", "course", "waypoint")):
+            return (
+                True,
+                f"Ambiguous marker target: '{q_clean}' references a marker without spatial disambiguation. Specify 'marker on the left' or 'marker on the right'."
+            )
+
         return False, None
 
     def _classify_task_type(self, q: str) -> TaskType:
@@ -291,15 +327,17 @@ class TaskInterpreter:
             "stop mobile", "stop base", "stop robot", "halt",
         )) or (("turn" in q or "rotate" in q) and any(r in q for r in ("robot", "base", "soccer", "degrees", "deg", "rsk", "in place"))):
             return TaskType.MOBILE_WHEEL_CONTROL
-        if any(w in q for w in ("move to", "drive to", "navigate to", "stop 0.", "stop 1.")):
+        if any(w in q for w in ("move to", "drive to", "navigate to", "stop 0.", "stop 1.", "avoid", "stop before", "move toward", "drive toward", "go to the waypoint", "go to waypoint")):
             return TaskType.MOBILE_NAVIGATION
         if any(w in q for w in ("fly", "takeoff", "land", "waypoint", "altitude", "quadcopter")):
             return TaskType.DRONE_FLIGHT
         if any(w in q for w in ("walk", "gait", "stand", "trot", "quadruped", "biped")):
             return TaskType.LEGGED_LOCOMOTION
+        if any(w in q for w in ("create", "build", "assemble", "launch", "setup", "spawn", "repair", "fix")):
+            return TaskType.SIMULATION_LIFECYCLE
         if any(w in q for w in ("camera", "picture", "capture", "scan", "inspect topic", "find", "detect", "locate")):
             return TaskType.PERCEPTION_INSPECTION
-        if any(w in q for w in ("create", "build", "assemble", "launch", "setup", "spawn", "repair", "fix", "inspect", "test")):
+        if any(w in q for w in ("inspect", "test")):
             return TaskType.SIMULATION_LIFECYCLE
         if any(w in q for w in ("move forward", "drive forward", "spin wheel")):
             return TaskType.MOBILE_WHEEL_CONTROL
@@ -338,6 +376,12 @@ class TaskInterpreter:
             return self.registry.get_model("skydio_x2")
         elif task_type == TaskType.LEGGED_LOCOMOTION:
             return self.registry.get_model("unitree_go2")
+        elif task_type == TaskType.PERCEPTION_INSPECTION:
+            if any(w in q for w in ("cube", "table", "arm", "panda", "ur5", "work")):
+                return self.registry.get_model("franka_panda")
+            if any(w in q for w in ("ball", "soccer", "goal")):
+                return self.registry.get_model("rsk")
+            return self.registry.get_model("differential_drive")
 
         return self.registry.get_model("differential_drive")
 
@@ -351,9 +395,9 @@ class TaskInterpreter:
         if override_world:
             return override_world
 
-        if task_type in (TaskType.MANIPULATION_PICK_PLACE, TaskType.MANIPULATION_TRAJECTORY) or (robot and robot.family == "robotic arm"):
+        if task_type in (TaskType.MANIPULATION_PICK_PLACE, TaskType.MANIPULATION_TRAJECTORY) or (robot and robot.family == "robotic arm") or any(w in q for w in ("cube", "table", "bin", "plate")):
             return "tabletop_world"
-        if robot and robot.id == "rsk":
+        if (robot and robot.id == "rsk") or any(w in q for w in ("ball", "soccer")):
             return "soccer_pitch"
         if task_type == TaskType.MOBILE_NAVIGATION:
             return "obstacle_world"
@@ -460,6 +504,28 @@ class TaskInterpreter:
                 target_entities.append(target)
                 # For navigation the target entity is also the destination
                 destination_entity = target
+
+            # Check for obstacle avoidance directive (e.g. "Avoid the obstacle and go to the waypoint")
+            if "avoid" in q_lower and "obstacle" in q_lower:
+                for ent in scene.list_entities():
+                    if ent.entity_type == "obstacle" or "obstacle" in ent.id:
+                        extra_params["avoid_obstacle"] = ent.id
+                        extra_params["obstacle_entity"] = ent
+                        extra_params["has_obstacle_avoidance"] = True
+                        break
+
+            # Check for stopping before obstacle directive (e.g. "Stop before reaching the obstacle")
+            if "stop before" in q_lower or ("stop" in q_lower and "obstacle" in q_lower):
+                extra_params["action_subtype"] = "stop_mobile_base"
+                extra_params["stop_before_obstacle"] = True
+                for ent in scene.list_entities():
+                    if ent.entity_type == "obstacle" or "obstacle" in ent.id:
+                        if not target:
+                            target_entities.append(ent)
+                            destination_entity = ent
+                        extra_params["obstacle_entity"] = ent
+                        break
+
             dist_match = re.search(r"stop\s+([0-9.]+)\s*(?:m|meter|metres)?", q_lower)
             extra_params["stop_distance_m"] = float(dist_match.group(1)) if dist_match else 0.5
 
@@ -573,6 +639,7 @@ class TaskInterpreter:
         compat_ids = {s.skill_id for s in compat_skills}
         if flight_controller_enabled and robot.family == "drone/aerial":
             compat_ids.add("drone_flight")
+        compat_ids.add("perceive_target")
 
         for step in steps:
             skill = self.skill_registry.get_skill(step.skill_id)
@@ -1083,6 +1150,32 @@ class TaskInterpreter:
                     can_retry=False,
                 )
             ]
+
+        # --- G. Perception & Inspection ---
+        elif task_type == TaskType.PERCEPTION_INSPECTION:
+            target = target_entities[0] if target_entities else None
+            target_id = target.id if target else "target_object"
+            target_name = target.name if target else "target object"
+            steps = [
+                SkillAction(
+                    step_index=1,
+                    skill_id="perceive_target",
+                    description=f"Perceive and detect {target_name} using simulated sensor pipeline",
+                    parameters={"target_object_id": target_id, "world_id": scene.world_id},
+                    preconditions=["model_physics_initialized"],
+                    expected_observation={"perception_verified": True},
+                    timeout_sec=5.0,
+                    is_critical=True,
+                    can_retry=False,
+                )
+            ]
+            conditions.append(VerificationCondition(
+                name=f"Perception Target Detection ({target_name})",
+                metric="perception_verified",
+                comparator="is_true",
+                expected_value=True,
+                is_mandatory=True,
+            ))
 
         return steps, predicate, conditions
 

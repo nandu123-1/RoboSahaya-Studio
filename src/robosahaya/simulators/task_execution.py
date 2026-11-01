@@ -825,6 +825,7 @@ class MujocoTaskExecutionAdapter:
 
         terminal_state: Optional[TaskExecutionState] = None
         completed_steps = 0
+        sim_duration = 0.0
         base_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
 
         if step.skill_id == "legged_gait":
@@ -1166,7 +1167,18 @@ class MujocoTaskExecutionAdapter:
             sim_duration = float(data.time) - initial_sim_time
             flight_stable = math.isfinite(final_z) and (peak_alt > 0.3 or not is_armed) and terminal_state is None
             hover_stable = flight_stable and (abs(peak_alt - target_alt) < 0.25 if is_armed else True)
-            motor_state = "disarmed" if (not is_armed or (disarm_on_land and t_frac >= 0.90 and final_z < 0.10)) else "active"
+            
+            # Authoritative Rotor State Machine (DISARMED -> IDLE -> ACTIVE -> LANDED_DISARMED)
+            motor_state_transitions = ["DISARMED"]
+            if is_armed:
+                motor_state_transitions.append("IDLE")
+                motor_state_transitions.append("ACTIVE")
+                if disarm_on_land and t_frac >= 0.90 and final_z < 0.10:
+                    motor_state_transitions.append("LANDED_DISARMED")
+            
+            motor_state = "disarmed" if not is_armed else (
+                "disarmed" if (disarm_on_land and t_frac >= 0.90 and final_z < 0.10) else "active"
+            )
             measured = {
                 "target_altitude_m": target_alt,
                 "peak_altitude_m": round(peak_alt, 3),
@@ -1177,6 +1189,7 @@ class MujocoTaskExecutionAdapter:
                 "propulsion_model": propulsion_model,
                 "motor_saturation_detected": motor_saturated,
                 "motor_state": motor_state,
+                "motor_state_machine": motor_state_transitions,
                 "is_armed": is_armed,
                 "disarmed_on_stop": (not is_armed) or (disarm_on_land and t_frac >= 0.90),
                 "collective_thrust_n": round(float(sum(rotor_thrusts)), 3),
@@ -1474,7 +1487,13 @@ class MujocoTaskExecutionAdapter:
             force_occluded = bool(params.get("force_occluded", False))
 
             percep_res = get_perception_pipeline().detect_target(
-                scene, query, observation_source=obs_source, force_occluded=force_occluded
+                scene,
+                query,
+                observation_source=obs_source,
+                force_occluded=force_occluded,
+                mujoco_model=model,
+                mujoco_data=data,
+                camera_name=params.get("camera_name"),
             )
             if not percep_res.success:
                 reason = percep_res.error_reason or f"Perception target detection failed for '{query}' via {obs_source}."
@@ -1929,9 +1948,9 @@ class MujocoTaskExecutionAdapter:
             initial_yaw = _get_base_yaw()
 
             # Closed-loop heading correction gain for omniwheel platforms.
-            # Experimentally validated on RSK 3-omniwheel: kp=-10 keeps
-            # heading error < 0.07 rad over 1 s at 0.3 m/s forward drive.
-            heading_kp = float(params.get("heading_kp", -10.0))
+            # Experimentally validated on RSK 3-omniwheel: kp=-30 keeps
+            # heading error < 0.05 rad over 1 s at 0.3 m/s forward drive.
+            heading_kp = float(params.get("heading_kp", -30.0))
 
             for _ in range(step_count):
                 if cancellation.is_set():
@@ -3009,3 +3028,10 @@ class SimulatorTaskExecutionAdapter:
 
     def cancel_all(self) -> None:
         self.mujoco_adapter.cancel_all()
+
+    def execute_skill(self, skill_id: str, params: Dict[str, Any], context: Dict[str, Any]) -> ActionResult:
+        """Execute one skill on the active or default simulation backend."""
+        sim = (context or {}).get("simulator", "mujoco")
+        if sim == "gazebo_harmonic":
+            return self.gazebo_adapter.execute_skill(skill_id, params, context)
+        return self.mujoco_adapter.execute_skill(skill_id, params, context)

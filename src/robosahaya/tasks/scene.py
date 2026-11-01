@@ -117,8 +117,26 @@ class WorldScene:
         # Check marker / waypoint / landmark / obstacle matches
         # Prioritize marker/waypoint over obstacle when both keywords appear
         if "marker" in q or "waypoint" in q or "landmark" in q:
+            if "left" in q:
+                for ent in self._entities.values():
+                    if ("marker" in ent.id or "marker" in ent.name.lower() or ent.entity_type == "waypoint") and (
+                        "left" in ent.id or "left" in ent.name.lower() or ent.pose[1] > 0.1
+                    ):
+                        return ent
+            elif "right" in q:
+                for ent in self._entities.values():
+                    if ("marker" in ent.id or "marker" in ent.name.lower() or ent.entity_type == "waypoint") and (
+                        "right" in ent.id or "right" in ent.name.lower() or ent.pose[1] < -0.1
+                    ):
+                        return ent
             for ent in self._entities.values():
                 if "marker" in ent.id or "marker" in ent.name.lower() or ent.entity_type == "waypoint":
+                    return ent
+
+        # Obstacle matches when explicitly targeted (e.g., "stop before reaching the obstacle")
+        if "obstacle" in q and not any(w in q for w in ("avoid", "waypoint", "marker", "cube", "ball")):
+            for ent in self._entities.values():
+                if "obstacle" in ent.id or ent.entity_type == "obstacle":
                     return ent
         for ent in self._entities.values():
             if not ent.is_static and (ent.id in q or ent.name.lower() in q):
@@ -273,6 +291,22 @@ def _build_obstacle_world() -> WorldScene:
         name="Navigation Goal Marker",
         entity_type="waypoint",
         pose=(3.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        dimensions=(0.2, 0.2, 0.01),
+        is_static=True,
+    ))
+    scene.add_entity(SceneEntity(
+        id="marker_left",
+        name="Goal Marker Left",
+        entity_type="waypoint",
+        pose=(2.5, 1.2, 0.0, 0.0, 0.0, 0.0),
+        dimensions=(0.2, 0.2, 0.01),
+        is_static=True,
+    ))
+    scene.add_entity(SceneEntity(
+        id="marker_right",
+        name="Goal Marker Right",
+        entity_type="waypoint",
+        pose=(2.5, -1.2, 0.0, 0.0, 0.0, 0.0),
         dimensions=(0.2, 0.2, 0.01),
         is_static=True,
     ))
