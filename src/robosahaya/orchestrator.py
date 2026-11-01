@@ -358,21 +358,21 @@ class TaskOrchestrator:
             is_manual = is_robot_overridden or is_world_overridden
 
             approved_robots = ("differential_drive", "robotic_arm_6dof", "franka_panda", "so_arm101", "rsk")
-            approved_worlds = ("obstacle_world", "tabletop_world", "soccer_pitch")
+            approved_worlds = ("obstacle_world", "tabletop_world", "soccer_pitch", "mujoco")
 
-            if effective_robot not in approved_robots:
+            if effective_robot not in approved_robots and self.robot_registry.get_model(effective_robot) is None:
                 is_supported = False
                 rejection_reason = (
                     f"Unsupported Robot Template: '{effective_robot}'. RoboSahaya Studio currently provides verified templates for 'differential_drive', 'robotic_arm_6dof', 'so_arm101', and 'rsk'. "
                     "Please select one of the supported templates."
                 )
-            elif effective_world not in approved_worlds:
+            elif effective_world not in approved_worlds and effective_robot in approved_robots:
                 is_supported = False
                 rejection_reason = (
                     f"Unsupported Simulation World: '{effective_world}'. Documented worlds are 'obstacle_world', 'tabletop_world', and 'soccer_pitch'. "
                     "Please select a documented world."
                 )
-            else:
+            elif effective_robot in approved_robots:
                 compatible_worlds = {
                     "differential_drive": {"obstacle_world"},
                     "robotic_arm_6dof": {"tabletop_world"},
@@ -389,13 +389,59 @@ class TaskOrchestrator:
                         "Choose a compatible pair and formulate the plan again."
                     )
 
+        # Autonomous Engineering Gate (Universal Robot Builder)
+        # If the robot is unverified or lacks a pre-bundled runtime adapter,
+        # trigger automatic preparation, controller synthesis, and physics validation
+        prep_report = None
+        if not is_supported or effective_robot not in approved_robots:
+            candidate_robot_id = (
+                infer.get("resolved_model_id") or
+                (effective_robot if effective_robot not in ("unsupported_legged_robot", "aerial_drone", "ambiguous_selection") else None)
+            )
+            # Only resolve by keyword if prompt did NOT request an unsupported generic capability like generic drone
+            if not candidate_robot_id and "aerial_drone" not in infer["unsupported_capabilities"]:
+                from .builder import get_universal_builder
+                cand_m = get_universal_builder().resolve_canonical_id(query)
+                if cand_m:
+                    candidate_robot_id = cand_m.id
+
+            if candidate_robot_id and candidate_robot_id != "so_arm100" and self.robot_registry.get_model(candidate_robot_id) is not None:
+                from .builder import get_universal_builder
+                builder = get_universal_builder()
+                report = builder.build_robot(candidate_robot_id, query)
+                if report.success:
+                    prep_report = report
+                    is_supported = True
+                    rejection_reason = None
+                    infer["unsupported_capabilities"] = []
+                    effective_robot = report.robot_id
+                    effective_world = report.simulator if report.simulator == "mujoco" else effective_world
+                    sim_adapter_name = report.simulator
+                    infer["sensors"] = ["Joint Position Encoders", "IMU"]
+                    infer["topics"] = ["/joint_states", "/imu/data"]
+                    infer["verification_tests"] = [f"test_{report.robot_id}_physics_stepping"]
+                    infer["measurable_criteria"] = {
+                        "min_steps": 100,
+                        "physics_validated": True,
+                        "actuators_count": len(report.actuators),
+                        "dof_count": report.dof,
+                    }
+                    infer["expected_behavior"] = (
+                        f"Auto-engineered {report.display_name} in {report.simulator}: "
+                        f"{len(report.controllers_developed)} controllers, {report.physics_steps_tested} validated physics steps."
+                    )
+
         target_model = self.robot_registry.get_model(effective_robot)
-        if target_model:
+        if prep_report:
+            sim_adapter_name = prep_report.simulator
+            model_fmt = target_model.formats[0] if target_model and target_model.formats else "MJCF"
+        elif target_model:
             sim_adapter, _ = self.simulator_registry.select_adapter(target_model)
             sim_adapter_name = sim_adapter.name if sim_adapter else target_model.default_simulator
             model_fmt = target_model.formats[0] if target_model.formats else "URDF"
         else:
             sim_adapter_name = "gazebo_harmonic"
+            model_fmt = "URDF"
             model_fmt = "URDF"
 
         # Structured task interpretation and capability resolution
@@ -549,6 +595,9 @@ class TaskOrchestrator:
             model_format=model_fmt,
             task_spec=task_spec.model_dump() if task_spec else None,
             action_steps=[s.model_dump() for s in task_spec.action_sequence] if task_spec else [],
+            auto_engineered=bool(prep_report and prep_report.success),
+            preparation_report=prep_report.model_dump() if prep_report else None,
+            preparation_stages=[s["stage"] if isinstance(s, dict) else (s.value if hasattr(s, "value") else str(s)) for s in prep_report.stages] if prep_report else [],
         )
 
     async def execute_studio_pipeline(

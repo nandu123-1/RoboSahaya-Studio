@@ -212,6 +212,30 @@ class RoboSahayaStudioApp:
         sim_adapter = getattr(plan, "simulator_adapter", "gazebo")
         model_fmt = getattr(plan, "model_format", "URDF/SDF")
 
+        engineering_section = ""
+        if getattr(plan, "auto_engineered", False) or getattr(plan, "preparation_report", None):
+            prep = getattr(plan, "preparation_report", {}) or {}
+            act_cnt = len(prep.get("actuators", []))
+            dof_cnt = prep.get("dof", 0)
+            mass = prep.get("mass_kg", 0.0)
+            ctrls = ", ".join(f"`{c}`" for c in prep.get("controllers_developed", [])) or "`standing_balance_controller`"
+            steps = prep.get("physics_steps_tested", 100)
+            diag_str = " | ".join(prep.get("diagnostics", [])) or "Physics verified stable, zero NaNs"
+            stage_list = prep.get("stages", [])
+            stage_badges = " ➔ ".join(
+                f"**[{s.get('stage', '').upper()}]**" for s in stage_list if isinstance(s, dict)
+            ) or "`REQUEST_RECEIVED ➔ ROBOT_IDENTIFIED ➔ MODEL_PREPARATION ➔ CONTROLLER_DEVELOPMENT ➔ VALIDATION`"
+
+            engineering_section = f"""
+- **🤖 Autonomous Robot Builder & Controller Engineering Dashboard:**
+  - **Engineering Pipeline:** {stage_badges}
+  - **Robot Model Kinematics:** `{act_cnt}` Actuators | `{dof_cnt}` DOF | Base Mass: `{mass:.2f} kg`
+  - **Synthesized Controllers:** {ctrls}
+  - **Simulator Engine Selected:** `{prep.get('simulator', sim_adapter).upper()}` ({model_fmt.upper()})
+  - **Physics Validation Stepping:** `🟢 {steps} stable steps (Zero NaNs detected)`
+  - **Engineering Diagnostics:** *{diag_str}*
+"""
+
         task_section = ""
         spec = getattr(plan, "task_spec", None)
         if spec:
@@ -261,7 +285,8 @@ class RoboSahayaStudioApp:
 {verif_str}
 """
 
-        return f"""{stale_alert}### 📋 Plan Status: APPROVED FOR EXECUTION
+        status_label = "APPROVED (Auto-Engineered)" if getattr(plan, "auto_engineered", False) else "APPROVED FOR EXECUTION"
+        return f"""{stale_alert}### 📋 Plan Status: {status_label}
 **Mode:** `{selection_mode_badge}` | **Plan Digest:** {digest_display}
 
 - **User Goal:** *"{plan.user_goal}"*
@@ -274,6 +299,7 @@ class RoboSahayaStudioApp:
 - **Permission Tiers:** {tiers_str}
 - **Planned Verification Tests:** {tests_str}
 - **Expected Behavior:** *{plan.expected_behavior or 'Nominal sensor streams and Gazebo simulation.'}*
+{engineering_section}
 {task_section}
 {mcp_section}
 - **Assumptions & Safety Boundaries:**

@@ -309,26 +309,32 @@ class MujocoAdapter(SimulatorAdapter):
             alt_name = robot_model.source_info.get("package", robot_model.id)
             model_cache_dir = cache_base / alt_name
 
+        entrypoint_file = None
         if not model_cache_dir.exists():
-            return {
-                "success": False,
-                "error": f"Model assets for '{robot_model.id}' not found in cache ({model_cache_dir}). Run model preparation first.",
-            }
-
-        if (model_cache_dir / "scene.xml").exists():
-            entrypoint_file = model_cache_dir / "scene.xml"
+            from robosahaya.builder import get_universal_builder
+            builder_path = get_universal_builder().get_or_prepare_model_path(robot_model)
+            if builder_path and builder_path.is_file():
+                entrypoint_file = builder_path
+            else:
+                return {
+                    "success": False,
+                    "error": f"Model assets for '{robot_model.id}' not found in cache ({model_cache_dir}). Run model preparation first.",
+                }
         else:
-            entrypoint_name = robot_model.description_info.get("entrypoint", f"{robot_model.id}.xml")
-            entrypoint_file = model_cache_dir / entrypoint_name
-            if not entrypoint_file.exists():
-                xmls = list(model_cache_dir.glob("*.xml"))
-                if xmls:
-                    entrypoint_file = xmls[0]
-                else:
-                    return {
-                        "success": False,
-                        "error": f"No MJCF/XML entrypoint found in {model_cache_dir}.",
-                    }
+            if (model_cache_dir / "scene.xml").exists():
+                entrypoint_file = model_cache_dir / "scene.xml"
+            else:
+                entrypoint_name = robot_model.description_info.get("entrypoint", f"{robot_model.id}.xml")
+                entrypoint_file = model_cache_dir / entrypoint_name
+                if not entrypoint_file.exists():
+                    xmls = list(model_cache_dir.glob("*.xml"))
+                    if xmls:
+                        entrypoint_file = xmls[0]
+                    else:
+                        return {
+                            "success": False,
+                            "error": f"No MJCF/XML entrypoint found in {model_cache_dir}.",
+                        }
 
         # Create symlink or copy to target workspace directory for clean containment
         model_link = target_dir / "model.xml"

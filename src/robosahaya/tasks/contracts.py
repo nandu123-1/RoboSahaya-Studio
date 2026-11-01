@@ -36,6 +36,20 @@ class TaskType(str, Enum):
 
 class TaskExecutionState(str, Enum):
     """Execution state machine states."""
+    # Universal Task Preparation Pipeline (Phase 9)
+    REQUEST_RECEIVED = "request_received"
+    ROBOT_IDENTIFIED = "robot_identified"
+    MODEL_PREPARATION = "model_preparation"
+    SIMULATOR_SELECTION = "simulator_selection"
+    CONTROLLER_DEVELOPMENT = "controller_development"
+    SCENE_PREPARATION = "scene_preparation"
+    VALIDATION = "validation"
+    AWAITING_USER_APPROVAL = "awaiting_user_approval"
+    NEEDS_DEPENDENCY = "needs_dependency"
+    NEEDS_USER_INPUT = "needs_user_input"
+    ENGINEERING_FAILED = "engineering_failed"
+
+    # Execution & Verification states
     TASK_RECEIVED = "task_received"
     TASK_PARSED = "task_parsed"
     CAPABILITIES_CHECKED = "capabilities_checked"
@@ -303,6 +317,13 @@ class TaskSpecification(BaseModel):
     plan_fingerprint: str = ""
     is_stale: bool = False
     plan_status: Literal["draft", "approved", "rejected", "invalidated", "executing", "completed", "failed"] = "draft"
+
+    # Universal Autonomous Robot Builder (Phase 9)
+    robot_family: Optional[str] = None
+    preparation_stages: List[Dict[str, Any]] = Field(default_factory=list)
+    auto_engineered: bool = False
+    engineering_notes: List[str] = Field(default_factory=list)
+    current_stage: str = "request_received"
 
     def compute_fingerprint(self) -> str:
         """Compute and set the plan's deterministic SHA-256 fingerprint."""

@@ -100,21 +100,27 @@ class IdentityResolver:
                     alias_matches.append((model.id, alias, len(a_norm)))
 
         if alias_matches:
-            # Sort by longest matched alias length descending
-            alias_matches.sort(key=lambda x: x[2], reverse=True)
-            best_id, best_alias, _ = alias_matches[0]
-            
-            # Check if there are conflicting matches of similar specificity from different robots
-            unique_matched_ids = list(dict.fromkeys(m[0] for m in alias_matches))
-            if len(unique_matched_ids) > 1 and alias_matches[0][2] == alias_matches[1][2]:
-                cand_list = [(mid, 0.75) for mid in unique_matched_ids]
+            # Group best match length per unique robot ID
+            best_by_robot: Dict[str, Tuple[str, int]] = {}
+            for rid, alias, length in alias_matches:
+                if rid not in best_by_robot or length > best_by_robot[rid][1]:
+                    best_by_robot[rid] = (alias, length)
+
+            # Sort robots by their best match length descending
+            sorted_robots = sorted(best_by_robot.items(), key=lambda x: x[1][1], reverse=True)
+            best_id, (best_alias, best_len) = sorted_robots[0]
+
+            # Check if there are conflicting matches of equal specificity from DIFFERENT robots
+            if len(sorted_robots) > 1 and sorted_robots[0][1][1] == sorted_robots[1][1][1]:
+                conflicting_ids = [rid for rid, (_, l) in sorted_robots if l == best_len]
+                cand_list = [(mid, 0.75) for mid in conflicting_ids]
                 return IdentityResolutionResult(
                     resolved_id=None,
                     confidence=0.5,
                     match_type="ambiguous",
                     candidates=cand_list,
                     requires_clarification=True,
-                    clarification_message=f"Prompt matched multiple robots: {', '.join(unique_matched_ids)}. Please specify which one.",
+                    clarification_message=f"Prompt matched multiple robots: {', '.join(conflicting_ids)}. Please specify which one.",
                     notes="Multiple conflicting alias matches found with equal length.",
                 )
 
@@ -173,11 +179,12 @@ class IdentityResolver:
                 if ratio >= 0.70:
                     fuzzy_candidates.append((model.id, name, ratio))
 
-                # Also compare token-level similarity
+                # Also compare token-level similarity (exclude common generic English words from fuzzy matching brand aliases)
+                generic_robotics_words = {"robot", "robotic", "robots", "arm", "arms", "gripper", "chassis", "camera", "sensor", "model", "build", "create", "make", "simulate", "device"}
                 for token in norm_query.split():
-                    if len(token) >= 3:
+                    if len(token) >= 3 and token not in generic_robotics_words:
                         t_ratio = difflib.SequenceMatcher(None, token, n_norm).ratio()
-                        if t_ratio >= 0.85:
+                        if t_ratio >= 0.88:
                             fuzzy_candidates.append((model.id, name, t_ratio))
 
         if fuzzy_candidates:

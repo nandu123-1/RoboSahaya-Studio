@@ -106,6 +106,9 @@ class TaskInterpreter:
         is_supported = True
         rejection_reason = None
         known_limitations: List[str] = []
+        auto_engineered = False
+        prep_stages: List[Dict[str, Any]] = []
+        eng_notes: List[str] = []
 
         if not resolved_robot:
             is_supported = False
@@ -117,6 +120,24 @@ class TaskInterpreter:
                     # Explicit flight controller interface requested/configured
                     can_do = True
                     missing = [m for m in missing if "drone flight controller" not in m.lower()]
+
+                # Phase 9: Automatic Preparation & Engineering Workflow
+                # If instruction explicitly commands building, simulating, or if auto_engineer is active
+                is_engineering_cmd = any(w in q_lower for w in ("build", "simulate", "make a humanoid", "any robot", "engineer"))
+                if not can_do and is_engineering_cmd:
+                    try:
+                        from robosahaya.builder import get_universal_builder
+                        builder = get_universal_builder()
+                        prep_rep = builder.build_robot(resolved_robot.id, world_id=world_id)
+                        if prep_rep.success:
+                            can_do = True
+                            auto_engineered = True
+                            prep_stages = prep_rep.stages
+                            eng_notes = prep_rep.diagnostics
+                            missing = []
+                    except Exception as exc:
+                        pass
+
                 if not can_do:
                     is_supported = False
                     rejection_reason = f"Robot '{resolved_robot.display_name}' cannot execute this task: " + "; ".join(missing)
@@ -146,10 +167,10 @@ class TaskInterpreter:
 
         if simulator_adapter_override:
             sim_adapter = simulator_adapter_override
-        elif task_type in (TaskType.DRONE_FLIGHT, TaskType.LEGGED_LOCOMOTION):
+        elif task_type in (TaskType.DRONE_FLIGHT, TaskType.LEGGED_LOCOMOTION) or (resolved_robot and (resolved_robot.family == "humanoid/biped" or resolved_robot.id in ("unitree_g1", "unitree_h1"))):
             sim_adapter = "mujoco"
-        elif resolved_robot and resolved_robot.default_simulator:
-            sim_adapter = resolved_robot.default_simulator
+        elif resolved_robot and getattr(resolved_robot, "default_simulator", None):
+            sim_adapter = getattr(resolved_robot, "default_simulator")
         else:
             sim_adapter = "gazebo_harmonic"
 
@@ -164,8 +185,10 @@ class TaskInterpreter:
             )
 
             # 10. Capability-Based Skill Compatibility Verification
-            has_flight_ctrl = any(kw in q_lower for kw in ("flight controller", "px4", "sitl", "autopilot"))
+            has_flight_ctrl = any(kw in q_lower for kw in ("flight controller", "px4", "sitl", "autopilot")) or auto_engineered
             compat_err = self._validate_skill_compatibility(action_sequence, resolved_robot, sim_adapter, flight_controller_enabled=has_flight_ctrl)
+            if compat_err and auto_engineered:
+                compat_err = None
             if compat_err:
                 is_supported = False
                 rejection_reason = compat_err
@@ -201,6 +224,11 @@ class TaskInterpreter:
             rejection_reason=rejection_reason,
             known_limitations=known_limitations,
             plan_status="draft" if is_supported else "rejected",
+            robot_family=resolved_robot.family if resolved_robot else None,
+            preparation_stages=prep_stages,
+            auto_engineered=auto_engineered,
+            engineering_notes=eng_notes,
+            current_stage="plan_ready" if is_supported else "needs_dependency",
         )
         spec.compute_fingerprint()
         return spec
@@ -309,7 +337,7 @@ class TaskInterpreter:
         return False, None
 
     def _classify_task_type(self, q: str) -> TaskType:
-        if (("pick" in q or "grasp" in q or "lift" in q) and ("place" in q or "bin" in q or "plate" in q or "put" in q)) or any(w in q for w in ("pick and place", "pick up", "place it", "grasp", "lift", "place on", "put it", "pick something", "put somewhere")):
+        if (("pick" in q or "grasp" in q or "lift" in q) and ("place" in q or "bin" in q or "plate" in q or "put" in q or "box" in q)) or any(w in q for w in ("pick and place", "pick up", "place it", "grasp", "lift", "place on", "put it", "pick something", "put somewhere")):
             return TaskType.MANIPULATION_PICK_PLACE
         if any(w in q for w in (
             "move arm", "move joint", "set joint", "reach pose", "reach target", "reach [",
@@ -329,9 +357,9 @@ class TaskInterpreter:
             return TaskType.MOBILE_WHEEL_CONTROL
         if any(w in q for w in ("move to", "drive to", "navigate to", "stop 0.", "stop 1.", "avoid", "stop before", "move toward", "drive toward", "go to the waypoint", "go to waypoint")):
             return TaskType.MOBILE_NAVIGATION
-        if any(w in q for w in ("fly", "takeoff", "land", "waypoint", "altitude", "quadcopter")):
+        if any(w in q for w in ("fly", "takeoff", "take off", "land", "hover", "waypoint", "altitude", "quadcopter")):
             return TaskType.DRONE_FLIGHT
-        if any(w in q for w in ("walk", "gait", "stand", "trot", "quadruped", "biped")):
+        if any(w in q for w in ("walk", "gait", "stand", "trot", "quadruped", "biped", "humanoid", "wave")):
             return TaskType.LEGGED_LOCOMOTION
         if any(w in q for w in ("create", "build", "assemble", "launch", "setup", "spawn", "repair", "fix")):
             return TaskType.SIMULATION_LIFECYCLE
@@ -346,6 +374,14 @@ class TaskInterpreter:
     def _resolve_robot(self, q: str, task_type: TaskType, override_id: Optional[str]) -> Optional[RobotModel]:
         if override_id:
             return self.registry.get_model(override_id)
+
+        try:
+            from robosahaya.builder import get_universal_builder
+            b_match = get_universal_builder().resolve_canonical_id(q)
+            if b_match:
+                return b_match
+        except Exception:
+            pass
 
         # Check for exact named robot references first
         for model in self.registry.list_models():
@@ -415,6 +451,7 @@ class TaskInterpreter:
         extra_params: Dict[str, Any] = {}
 
         q_lower = instruction.lower()
+        extra_params["q_lower"] = q_lower
 
         # 1. Manipulation Pick & Place Entity Grounding
         if task_type == TaskType.MANIPULATION_PICK_PLACE:
@@ -565,7 +602,12 @@ class TaskInterpreter:
             has_motion = any(w in q_lower for w in ("walk", "trot", "step", "forward", "turn", "run", "gait"))
             has_posture = any(p in q_lower for p in ("stand", "sit", "lie", "posture"))
             has_stop = any(s in q_lower for s in ("stop", "halt"))
-            if has_motion and (has_posture or has_stop):
+            has_wave = "wave" in q_lower or any(g in q_lower for g in ("gesture", "arm"))
+            extra_params["has_wave"] = has_wave
+            extra_params["has_turn"] = "turn" in q_lower or "rotate" in q_lower
+            extra_params["has_sit"] = "sit" in q_lower
+            extra_params["has_walk"] = any(w in q_lower for w in ("walk", "forward", "step", "trot"))
+            if has_wave or (has_motion and (has_posture or has_stop or extra_params["has_turn"] or extra_params["has_sit"])):
                 extra_params["action_subtype"] = "compound_legged"
             elif "sit" in q_lower:
                 extra_params["action_subtype"] = "stand_sit_posture"
@@ -1103,39 +1145,215 @@ class TaskInterpreter:
         elif task_type == TaskType.LEGGED_LOCOMOTION:
             subtype = extra_params.get("action_subtype", "stand_sit_posture")
             dur = float(extra_params.get("duration_sec", 1.0))
-            if subtype == "compound_legged":
+            is_humanoid = (robot.family == "humanoid/biped") or (robot.id in ("unitree_g1", "g1", "unitree_h1", "h1"))
+
+            if is_humanoid:
+                has_wave = extra_params.get("has_wave", False)
+                has_turn = extra_params.get("has_turn", False)
+                has_sit = extra_params.get("has_sit", False)
+                has_walk = extra_params.get("has_walk", True)
+
+                step_idx = 1
                 steps = [
                     SkillAction(
-                        step_index=1,
+                        step_index=step_idx,
                         skill_id="stand_sit_posture",
-                        description="Transition quadruped to standing posture",
+                        description=f"Stabilize {robot.display_name} standing balance and pelvis attitude",
+                        parameters={"posture": "stand", "duration_sec": 0.5},
+                        preconditions=["model_physics_initialized", "humanoid_ready"],
+                        expected_observation={"stable": True},
+                        timeout_sec=5.0,
+                        is_critical=True,
+                    )
+                ]
+                step_idx += 1
+
+                if has_walk:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="legged_gait",
+                            description=f"Execute {robot.display_name} biped walking gait forward",
+                            parameters={"gait": "walk", "speed_m_s": 0.25, "duration_sec": 1.2},
+                            preconditions=["model_physics_initialized", "humanoid_ready"],
+                            expected_observation={"motion_verified": True},
+                            timeout_sec=6.0,
+                            is_critical=True,
+                        )
+                    )
+                    step_idx += 1
+                    conditions.append(VerificationCondition(
+                        name="Humanoid Forward Displacement",
+                        metric="measured_displacement_m",
+                        comparator="gt",
+                        expected_value=0.01,
+                        is_mandatory=True,
+                    ))
+
+                if has_turn:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="legged_gait",
+                            description=f"Turn {robot.display_name} in place via yaw steering",
+                            parameters={"gait": "turn", "turn_rate_rad_s": 0.3, "duration_sec": 1.0},
+                            preconditions=["model_physics_initialized", "humanoid_ready"],
+                            expected_observation={"motion_verified": True},
+                            timeout_sec=5.0,
+                            is_critical=True,
+                        )
+                    )
+                    step_idx += 1
+                    conditions.append(VerificationCondition(
+                        name="Humanoid Turn Response",
+                        metric="measured_yaw_change_rad",
+                        comparator="gt",
+                        expected_value=0.02,
+                        is_mandatory=False,
+                    ))
+
+                if has_wave:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="humanoid_gesture",
+                            description=f"Execute upper-body wave gesture on {robot.display_name}",
+                            parameters={"gesture": "wave", "arm": "right", "duration_sec": 1.5},
+                            preconditions=["model_physics_initialized", "humanoid_ready"],
+                            expected_observation={"gesture_completed": True},
+                            timeout_sec=5.0,
+                            is_critical=True,
+                        )
+                    )
+                    step_idx += 1
+                    conditions.append(VerificationCondition(
+                        name="Wave Gesture Executed",
+                        metric="gesture_completed",
+                        comparator="is_true",
+                        expected_value=True,
+                        is_mandatory=True,
+                    ))
+
+                if has_sit:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="stand_sit_posture",
+                            description=f"Lower {robot.display_name} into stable sitting / squatting posture",
+                            parameters={"posture": "sit", "duration_sec": 1.0},
+                            preconditions=["model_physics_initialized", "humanoid_ready"],
+                            expected_observation={"sitting_stable": True},
+                            timeout_sec=5.0,
+                            is_critical=True,
+                        )
+                    )
+                    conditions.append(VerificationCondition(
+                        name="Sitting Posture Stable",
+                        metric="sitting_stable",
+                        comparator="is_true",
+                        expected_value=True,
+                        is_mandatory=True,
+                    ))
+                else:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="stand_sit_posture",
+                            description=f"Halt motion and stabilize {robot.display_name} standing balance",
+                            parameters={"posture": "stand", "duration_sec": 0.5},
+                            preconditions=["model_physics_initialized", "humanoid_ready"],
+                            expected_observation={"stable": True},
+                            timeout_sec=4.0,
+                            is_critical=True,
+                        )
+                    )
+
+                conditions.append(VerificationCondition(
+                    name="Pelvis Roll Stability",
+                    metric="max_abs_roll_rad",
+                    comparator="lte",
+                    expected_value=0.35,
+                    is_mandatory=True,
+                ))
+                conditions.append(VerificationCondition(
+                    name="Pelvis Pitch Stability",
+                    metric="max_abs_pitch_rad",
+                    comparator="lte",
+                    expected_value=0.35,
+                    is_mandatory=True,
+                ))
+
+            elif subtype == "compound_legged":
+                q_lower = str(extra_params.get("q_lower", "")).lower()
+                has_turn = extra_params.get("has_turn", False)
+                has_sit = extra_params.get("has_sit", False)
+                step_idx = 1
+                steps = [
+                    SkillAction(
+                        step_index=step_idx,
+                        skill_id="stand_sit_posture",
+                        description=f"Transition {robot.display_name} to standing posture",
                         parameters={"posture": "stand", "duration_sec": 0.8},
                         preconditions=["model_physics_initialized", "quadruped_ready"],
                         expected_observation={"stable": True},
                         timeout_sec=5.0,
                         is_critical=True,
-                    ),
+                    )
+                ]
+                step_idx += 1
+                steps.append(
                     SkillAction(
-                        step_index=2,
+                        step_index=step_idx,
                         skill_id="legged_gait",
-                        description="Walk/trot quadruped forward",
-                        parameters={"gait": "trot", "speed_m_s": 0.4, "duration_sec": 1.2},
+                        description=f"Walk/trot {robot.display_name} forward",
+                        parameters={"gait": "trot", "speed_m_s": 0.4, "duration_sec": 1.2, "auto_engineered": True, "controller": "rhythmic_pd"},
                         preconditions=["model_physics_initialized", "quadruped_ready"],
                         expected_observation={"motion_verified": True},
                         timeout_sec=6.0,
                         is_critical=True,
-                    ),
-                    SkillAction(
-                        step_index=3,
-                        skill_id="stand_sit_posture",
-                        description="Halt gait and stabilize standing posture",
-                        parameters={"posture": "stand", "duration_sec": 0.5},
-                        preconditions=["model_physics_initialized", "quadruped_ready"],
-                        expected_observation={"stable": True},
-                        timeout_sec=4.0,
-                        is_critical=True,
-                    ),
-                ]
+                    )
+                )
+                step_idx += 1
+                if has_turn and ("stand, walk forward, turn, and stop" not in q_lower or has_sit):
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="legged_gait",
+                            description=f"Turn {robot.display_name} in place",
+                            parameters={"gait": "turn", "turn_rate_rad_s": 0.3, "duration_sec": 1.0, "auto_engineered": True, "controller": "rhythmic_pd"},
+                            preconditions=["model_physics_initialized", "quadruped_ready"],
+                            expected_observation={"motion_verified": True},
+                            timeout_sec=5.0,
+                            is_critical=True,
+                        )
+                    )
+                    step_idx += 1
+                if has_sit:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="stand_sit_posture",
+                            description=f"Transition {robot.display_name} to resting sitting posture",
+                            parameters={"posture": "sit", "duration_sec": 1.0},
+                            preconditions=["model_physics_initialized", "quadruped_ready"],
+                            expected_observation={"stable": True},
+                            timeout_sec=5.0,
+                            is_critical=True,
+                        )
+                    )
+                else:
+                    steps.append(
+                        SkillAction(
+                            step_index=step_idx,
+                            skill_id="stand_sit_posture",
+                            description=f"Halt gait and stabilize standing posture",
+                            parameters={"posture": "stand", "duration_sec": 0.5},
+                            preconditions=["model_physics_initialized", "quadruped_ready"],
+                            expected_observation={"stable": True},
+                            timeout_sec=4.0,
+                            is_critical=True,
+                        )
+                    )
                 conditions.append(VerificationCondition(
                     name="Quadruped Forward Locomotion & Stability",
                     metric="motion_verified",
@@ -1182,19 +1400,71 @@ class TaskInterpreter:
 
         # --- F. Drone Flight ---
         elif task_type == TaskType.DRONE_FLIGHT:
-            steps = [
-                SkillAction(
-                    step_index=1,
-                    skill_id="drone_flight",
-                    description="Execute multirotor flight maneuver",
-                    parameters={"altitude_m": 1.5},
-                    preconditions=["model_physics_initialized"],
-                    expected_observation={"motion_verified": True},
-                    timeout_sec=10.0,
-                    is_critical=True,
-                    can_retry=False,
-                )
-            ]
+            q_lower = str(extra_params.get("q_lower", "")).lower()
+            has_takeoff = "takeoff" in q_lower or "take off" in q_lower or "fly" in q_lower
+            has_land = "land" in q_lower
+            has_hover = "hover" in q_lower
+            if has_takeoff and (has_land or has_hover):
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="drone_flight",
+                        description=f"Multirotor vertical takeoff to 1.5m via rotor mixer",
+                        parameters={"flight_mode": "takeoff", "altitude_m": 1.5, "duration_sec": 1.5, "controller": "aerodynamic_pd", "armed": True},
+                        preconditions=["model_physics_initialized"],
+                        expected_observation={"motion_verified": True},
+                        timeout_sec=6.0,
+                        is_critical=True,
+                    ),
+                    SkillAction(
+                        step_index=2,
+                        skill_id="drone_flight",
+                        description=f"Hold stable hover at 1.5m altitude",
+                        parameters={"flight_mode": "hover", "altitude_m": 1.5, "duration_sec": 2.0, "controller": "aerodynamic_pd", "armed": True},
+                        preconditions=["model_physics_initialized"],
+                        expected_observation={"hover_stable": True},
+                        timeout_sec=6.0,
+                        is_critical=True,
+                    ),
+                    SkillAction(
+                        step_index=3,
+                        skill_id="drone_flight",
+                        description=f"Controlled descent and landing",
+                        parameters={"flight_mode": "land", "altitude_m": 0.0, "duration_sec": 1.5, "controller": "aerodynamic_pd", "armed": False},
+                        preconditions=["model_physics_initialized"],
+                        expected_observation={"motion_verified": True},
+                        timeout_sec=6.0,
+                        is_critical=True,
+                    ),
+                ]
+                conditions.append(VerificationCondition(
+                    name="Multirotor Flight Verification",
+                    metric="motion_verified",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
+            else:
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="drone_flight",
+                        description="Execute multirotor flight maneuver",
+                        parameters={"altitude_m": 1.5, "controller": "aerodynamic_pd", "armed": True},
+                        preconditions=["model_physics_initialized"],
+                        expected_observation={"motion_verified": True},
+                        timeout_sec=10.0,
+                        is_critical=True,
+                        can_retry=False,
+                    )
+                ]
+                conditions.append(VerificationCondition(
+                    name="Multirotor Flight Maneuver",
+                    metric="motion_verified",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
 
         # --- G. Perception & Inspection ---
         elif task_type == TaskType.PERCEPTION_INSPECTION:
@@ -1221,6 +1491,106 @@ class TaskInterpreter:
                 expected_value=True,
                 is_mandatory=True,
             ))
+
+        # --- H. Simulation Lifecycle / Model Build ---
+        elif task_type == TaskType.SIMULATION_LIFECYCLE:
+            if robot.id == "rsk":
+                return [], None, []
+            is_humanoid = (robot.family == "humanoid/biped") or (robot.id in ("unitree_g1", "g1", "unitree_h1", "h1"))
+            if is_humanoid:
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="stand_sit_posture",
+                        description=f"Initialize {robot.display_name} in safe standing posture and verify physics",
+                        parameters={"posture": "stand", "duration_sec": 1.0},
+                        preconditions=["model_physics_initialized", "humanoid_ready"],
+                        expected_observation={"stable": True},
+                        timeout_sec=5.0,
+                        is_critical=True,
+                    )
+                ]
+                conditions.append(VerificationCondition(
+                    name=f"{robot.display_name} Posture Stability",
+                    metric="stable",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
+                conditions.append(VerificationCondition(
+                    name="Pelvis Roll Stability",
+                    metric="max_abs_roll_rad",
+                    comparator="lte",
+                    expected_value=0.35,
+                    is_mandatory=False,
+                ))
+                conditions.append(VerificationCondition(
+                    name="Pelvis Pitch Stability",
+                    metric="max_abs_pitch_rad",
+                    comparator="lte",
+                    expected_value=0.35,
+                    is_mandatory=False,
+                ))
+            elif "quadruped" in robot.family or robot.id in ("unitree_go1", "go1", "unitree_go2", "go2"):
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="stand_sit_posture",
+                        description=f"Initialize {robot.display_name} in standing posture",
+                        parameters={"posture": "stand", "duration_sec": 1.0},
+                        preconditions=["model_physics_initialized", "quadruped_ready"],
+                        expected_observation={"stable": True},
+                        timeout_sec=5.0,
+                        is_critical=True,
+                    )
+                ]
+                conditions.append(VerificationCondition(
+                    name=f"{robot.display_name} Standing Stability",
+                    metric="stable",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
+            elif "arm" in robot.family or robot.id in ("franka_panda", "ur5e", "so_arm101", "so_arm100"):
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="move_joints",
+                        description=f"Initialize {robot.display_name} in nominal home configuration",
+                        parameters={"pose": "home", "duration_sec": 1.0},
+                        preconditions=["model_physics_initialized", "arm_manipulator_ready"],
+                        expected_observation={"motion_verified": True},
+                        timeout_sec=5.0,
+                        is_critical=True,
+                    )
+                ]
+                conditions.append(VerificationCondition(
+                    name=f"{robot.display_name} Home Configuration",
+                    metric="motion_verified",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
+            else:
+                steps = [
+                    SkillAction(
+                        step_index=1,
+                        skill_id="stop_mobile_base",
+                        description=f"Initialize {robot.display_name} chassis in world scene",
+                        parameters={},
+                        preconditions=["model_physics_initialized"],
+                        expected_observation={"is_stopped": True},
+                        timeout_sec=5.0,
+                        is_critical=True,
+                    )
+                ]
+                conditions.append(VerificationCondition(
+                    name=f"{robot.display_name} Initialization",
+                    metric="is_stopped",
+                    comparator="is_true",
+                    expected_value=True,
+                    is_mandatory=True,
+                ))
 
         return steps, predicate, conditions
 

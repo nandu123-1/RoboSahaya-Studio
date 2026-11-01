@@ -367,5 +367,8 @@ class TaskPlan(StrictModel):
     milestones: Dict[str, Any] = Field(default_factory=dict)
     task_spec: Optional[Dict[str, Any]] = Field(default=None)
     action_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    auto_engineered: bool = False
+    preparation_report: Optional[Dict[str, Any]] = None
+    preparation_stages: List[str] = Field(default_factory=list)
 
 

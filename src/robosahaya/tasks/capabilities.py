@@ -194,17 +194,24 @@ class RobotCapabilityResolver:
 
         # 4. Quadrupeds and Humanoids
         elif family in ("quadruped", "humanoid/biped"):
-            is_supported_legged = model.id in ("unitree_go1", "go1")
+            is_supported_legged = model.id in ("unitree_go1", "go1", "unitree_g1", "g1", "unitree_h1", "h1")
             caps[CapabilityType.LEGGED_LOCOMOTION] = RobotCapability(
                 capability_type=CapabilityType.LEGGED_LOCOMOTION,
                 supported=is_supported_legged,
-                prerequisites=["WBC / MPC locomotion controller", "Ground contact sensors"],
+                prerequisites=["WBC / MPC locomotion controller", "Ground contact sensors"] if "quadruped" in family else ["Biped balance controller", "Ground contact sensors"],
+                required_controllers=["humanoid_locomotion_controller", "standing_balance_controller"] if "humanoid" in family else ["wbc_gait_controller"],
+                supported_adapters=["mujoco"],
+                control_interface="mujoco_ctrl_actuator",
                 limitation_reason=None if is_supported_legged else f"Legged gait controller for '{model.display_name}' is not integrated in this studio runtime. Blocked.",
             )
+            has_arms = model.id in ("unitree_g1", "g1", "unitree_h1", "h1") or "humanoid" in family
             caps[CapabilityType.MANIPULATION_ARM] = RobotCapability(
                 capability_type=CapabilityType.MANIPULATION_ARM,
-                supported=False,
-                limitation_reason=f"Locomotion model '{model.display_name}' does not configure arm manipulation in this studio profile.",
+                supported=has_arms,
+                required_controllers=["humanoid_gesture_controller"] if has_arms else [],
+                supported_adapters=["mujoco"] if has_arms else [],
+                control_interface="mujoco_ctrl_actuator" if has_arms else "",
+                limitation_reason=None if has_arms else f"Locomotion model '{model.display_name}' does not configure arm manipulation in this studio profile.",
             )
             caps[CapabilityType.MOBILE_WHEEL_VELOCITY] = RobotCapability(
                 capability_type=CapabilityType.MOBILE_WHEEL_VELOCITY,

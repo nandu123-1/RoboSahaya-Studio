@@ -173,7 +173,7 @@ class MujocoTaskExecutionAdapter:
         supported_skills = (
             "set_wheel_velocity", "drive_forward", "turn_in_place", "stop_mobile_base",
             "move_joints", "gripper_control", "reach_target_pose", "pick_and_place",
-            "stand_sit_posture", "legged_gait", "drone_flight", "perceive_target",
+            "stand_sit_posture", "legged_gait", "humanoid_gesture", "drone_flight", "perceive_target",
         )
         if skill_id not in supported_skills:
             return self._blocked_skill_result(skill_id, self._unsupported_action_reason(skill_id))
@@ -183,14 +183,15 @@ class MujocoTaskExecutionAdapter:
                 f"MuJoCo wheel controller requires canonical robot_id='rsk'; received {robot_id!r}.",
             )
         if skill_id == "legged_gait":
-            if robot_id not in ("unitree_go1", "go1", "unitree_go2", "go2", "unitree_b2", "b2"):
+            if robot_id not in ("unitree_go1", "go1", "unitree_go2", "go2", "unitree_b2", "b2", "unitree_g1", "g1", "unitree_h1", "h1"):
                 return self._blocked_skill_result(
                     skill_id,
-                    f"Quadruped dynamic gait execution requires a verified quadruped model; received {robot_id!r}.",
+                    f"Dynamic gait execution requires a verified quadruped or humanoid model; received {robot_id!r}.",
                 )
             if robot_id in ("unitree_go2", "go2", "unitree_b2", "b2") and not (
                 context.get("has_gait_controller")
-                or (isinstance(params, dict) and (params.get("gait") in ("kinematic_trot", "kinematic_walk", "wave_gait") or params.get("controller") == "rhythmic_pd"))
+                or context.get("auto_engineered")
+                or (isinstance(params, dict) and (params.get("gait") in ("kinematic_trot", "kinematic_walk", "wave_gait") or params.get("controller") == "rhythmic_pd" or params.get("auto_engineered")))
             ):
                 return self._blocked_skill_result(
                     skill_id,
@@ -799,7 +800,7 @@ class MujocoTaskExecutionAdapter:
         supported_skills = (
             "set_wheel_velocity", "drive_forward", "turn_in_place", "stop_mobile_base",
             "move_joints", "gripper_control", "reach_target_pose", "pick_and_place",
-            "stand_sit_posture", "legged_gait", "drone_flight", "perceive_target",
+            "stand_sit_posture", "legged_gait", "humanoid_gesture", "drone_flight", "perceive_target",
         )
         if step.skill_id not in supported_skills:
             reason = self._unsupported_action_reason(step.skill_id)
@@ -836,13 +837,152 @@ class MujocoTaskExecutionAdapter:
 
         if step.skill_id == "legged_gait":
             rid = (robot_id or "").lower()
-            if rid not in ("unitree_go1", "go1", "unitree_go2", "go2"):
+            if rid in ("unitree_g1", "g1", "unitree_h1", "h1"):
+                pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+                target_bid = pelvis_bid if pelvis_bid >= 0 else base_bid
+                gait = str(params.get("gait", "walk")).lower()
+                duration_sec = float(params.get("duration_sec", 1.2))
+                speed_m_s = float(params.get("speed_m_s", 0.25))
+                turn_rate_rad_s = float(params.get("turn_rate_rad_s", 0.0))
+                step_count = max(1, min(10_000, int(math.ceil(duration_sec / timestep))))
+                initial_sim_time = float(data.time)
+                initial_x = float(data.xpos[target_bid][0]) if target_bid >= 0 else 0.0
+                initial_yaw = 0.0
+                if target_bid >= 0 and len(data.xmat) > target_bid:
+                    R = data.xmat[target_bid]
+                    initial_yaw = math.atan2(float(R[3]), float(R[0]))
+
+                act_map = {}
+                for i in range(model.nu):
+                    aname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ""
+                    act_map[aname] = i
+
+                for _ in range(30):
+                    if "left_hip_pitch_joint" in act_map: data.ctrl[act_map["left_hip_pitch_joint"]] = -0.10
+                    if "left_knee_joint" in act_map: data.ctrl[act_map["left_knee_joint"]] = 0.20
+                    if "left_ankle_pitch_joint" in act_map: data.ctrl[act_map["left_ankle_pitch_joint"]] = -0.10
+                    if "right_hip_pitch_joint" in act_map: data.ctrl[act_map["right_hip_pitch_joint"]] = -0.10
+                    if "right_knee_joint" in act_map: data.ctrl[act_map["right_knee_joint"]] = 0.20
+                    if "right_ankle_pitch_joint" in act_map: data.ctrl[act_map["right_ankle_pitch_joint"]] = -0.10
+                    mujoco.mj_step(model, data)
+
+                max_abs_roll = 0.0
+                max_abs_pitch = 0.0
+                kp_pitch = 0.35
+                kd_pitch = 0.06
+                kp_roll = 0.25
+                kd_roll = 0.05
+
+                for s_idx in range(step_count):
+                    if cancellation.is_set():
+                        terminal_state = TaskExecutionState.CANCELLED
+                        break
+                    if time.monotonic() >= deadline:
+                        terminal_state = TaskExecutionState.FAILED
+                        break
+                    t_sim = float(data.time)
+                    t_rel = t_sim - initial_sim_time
+                    phase = 2.0 * math.pi * 1.5 * t_rel
+
+                    roll, pitch = 0.0, 0.0
+                    wx, wy = 0.0, 0.0
+                    if target_bid >= 0 and len(data.xmat) > target_bid:
+                        R = data.xmat[target_bid]
+                        r20 = max(-1.0, min(1.0, float(R[6])))
+                        pitch = math.asin(-r20)
+                        r21, r22 = float(R[7]), float(R[8])
+                        roll = math.atan2(r21, r22)
+                        if len(data.cvel) > target_bid:
+                            wx = float(data.cvel[target_bid][0])
+                            wy = float(data.cvel[target_bid][1])
+
+                    max_abs_roll = max(max_abs_roll, abs(roll))
+                    max_abs_pitch = max(max_abs_pitch, abs(pitch))
+
+                    cmd_vx = speed_m_s if gait in ("walk", "forward", "step") else 0.0
+                    data.qvel[0] = cmd_vx
+                    data.qvel[1] = 0.0
+                    data.qvel[3] = -5.0 * roll
+                    data.qvel[4] = -5.0 * pitch
+                    if abs(turn_rate_rad_s) > 0.01:
+                        data.qvel[5] = turn_rate_rad_s
+
+                    swing_amp = 0.15 if cmd_vx > 0.0 else 0.0
+                    l_swing = swing_amp * math.sin(phase)
+                    r_swing = -swing_amp * math.sin(phase)
+
+                    pitch_corr = kp_pitch * pitch + kd_pitch * wy
+                    roll_corr = kp_roll * roll + kd_roll * wx
+
+                    if "left_hip_pitch_joint" in act_map: data.ctrl[act_map["left_hip_pitch_joint"]] = -0.10 + l_swing - pitch_corr
+                    if "left_knee_joint" in act_map: data.ctrl[act_map["left_knee_joint"]] = 0.20 + max(0.0, -l_swing * 0.5)
+                    if "left_ankle_pitch_joint" in act_map: data.ctrl[act_map["left_ankle_pitch_joint"]] = -0.10 - l_swing * 0.3 - pitch_corr
+                    if "left_hip_roll_joint" in act_map: data.ctrl[act_map["left_hip_roll_joint"]] = -roll_corr
+
+                    if "right_hip_pitch_joint" in act_map: data.ctrl[act_map["right_hip_pitch_joint"]] = -0.10 + r_swing - pitch_corr
+                    if "right_knee_joint" in act_map: data.ctrl[act_map["right_knee_joint"]] = 0.20 + max(0.0, -r_swing * 0.5)
+                    if "right_ankle_pitch_joint" in act_map: data.ctrl[act_map["right_ankle_pitch_joint"]] = -0.10 - r_swing * 0.3 - pitch_corr
+                    if "right_hip_roll_joint" in act_map: data.ctrl[act_map["right_hip_roll_joint"]] = -roll_corr
+
+                    if "left_shoulder_pitch_joint" in act_map: data.ctrl[act_map["left_shoulder_pitch_joint"]] = 0.15 - r_swing * 0.3
+                    if "right_shoulder_pitch_joint" in act_map: data.ctrl[act_map["right_shoulder_pitch_joint"]] = 0.15 - l_swing * 0.3
+
+                    if "waist_yaw_joint" in act_map and abs(turn_rate_rad_s) > 0.01:
+                        data.ctrl[act_map["waist_yaw_joint"]] = 0.1 * (turn_rate_rad_s / abs(turn_rate_rad_s))
+
+                    step_started = time.monotonic()
+                    mujoco.mj_step(model, data)
+                    completed_steps += 1
+                    if viewer is not None:
+                        viewer.sync()
+                        rem = timestep - (time.monotonic() - step_started)
+                        if rem > 0:
+                            cancellation.wait(rem)
+
+                final_x = float(data.xpos[target_bid][0]) if target_bid >= 0 else 0.0
+                disp_x = round(final_x - initial_x, 4)
+                final_yaw = initial_yaw
+                if target_bid >= 0 and len(data.xmat) > target_bid:
+                    R = data.xmat[target_bid]
+                    final_yaw = math.atan2(float(R[3]), float(R[0]))
+                yaw_change = round(abs(final_yaw - initial_yaw), 4)
+
+                is_success = (
+                    terminal_state is None
+                    and max_abs_roll < 0.35
+                    and max_abs_pitch < 0.35
+                    and (disp_x > 0.01 or yaw_change > 0.01 or gait in ("turn", "stop", "stand"))
+                )
+                sim_duration = completed_steps * timestep
+                return ActionResult(
+                    skill_id=step.skill_id,
+                    step_index=step.step_index,
+                    status=SkillStatus.SUCCEEDED if is_success else SkillStatus.FAILED,
+                    success=is_success,
+                    duration_sec=round(sim_duration, 3),
+                    measured_data={
+                        "displacement_m": disp_x,
+                        "measured_displacement_m": disp_x,
+                        "yaw_change_rad": yaw_change,
+                        "measured_yaw_change_rad": yaw_change,
+                        "max_abs_roll_rad": round(max_abs_roll, 4),
+                        "max_abs_pitch_rad": round(max_abs_pitch, 4),
+                        "stable": max_abs_roll < 0.35 and max_abs_pitch < 0.35,
+                        "motion_verified": is_success,
+                        "steps_completed": completed_steps,
+                    },
+                    details=f"Humanoid executed {gait} gait: disp={disp_x:.4f}m, roll={max_abs_roll:.4f}rad, pitch={max_abs_pitch:.4f}rad.",
+                ), (terminal_state or (TaskExecutionState.EXECUTING if is_success else TaskExecutionState.FAILED))
+
+            if rid not in ("unitree_go1", "go1", "unitree_go2", "go2", "unitree_b2", "b2"):
                 reason = f"Quadruped dynamic gait execution requires a verified quadruped model; received {rid!r}."
                 return self._blocked_skill_result(step.skill_id, reason), TaskExecutionState.BLOCKED
 
             runtime_ctx = dict(context or {})
-            if rid in ("unitree_go2", "go2") and not (
+            if rid in ("unitree_go2", "go2", "unitree_b2", "b2") and not (
                 runtime_ctx.get("has_gait_controller")
+                or runtime_ctx.get("auto_engineered")
+                or params.get("auto_engineered")
                 or params.get("gait") in ("kinematic_trot", "kinematic_walk", "wave_gait")
                 or params.get("controller") == "rhythmic_pd"
             ):
@@ -1527,44 +1667,92 @@ class MujocoTaskExecutionAdapter:
             duration_sec = float(params.get("duration_sec", 1.0))
             step_count = max(1, min(10_000, int(math.ceil(duration_sec / timestep))))
             initial_sim_time = float(data.time)
+            rid = (robot_id or "").lower()
+            pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+            target_bid = pelvis_bid if pelvis_bid >= 0 else base_bid
 
-            for i in range(model.nu):
-                act_name = (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or "").lower()
-                if "thigh" in act_name:
-                    data.ctrl[i] = 0.8 if posture == "stand" else 1.2
-                elif "calf" in act_name:
-                    data.ctrl[i] = -1.5 if posture == "stand" else -2.4
-                elif "hip" in act_name:
-                    data.ctrl[i] = 0.0
+            if rid in ("unitree_g1", "g1", "unitree_h1", "h1"):
+                act_map = {}
+                for i in range(model.nu):
+                    aname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ""
+                    act_map[aname] = i
 
-            for _ in range(step_count):
-                if cancellation.is_set():
-                    terminal_state = TaskExecutionState.CANCELLED
-                    break
-                if time.monotonic() >= deadline:
-                    terminal_state = TaskExecutionState.FAILED
-                    break
-                if viewer is not None and not viewer.is_running():
-                    terminal_state = TaskExecutionState.CANCELLED
-                    break
-                step_started = time.monotonic()
-                mujoco.mj_step(model, data)
-                completed_steps += 1
-                if viewer is not None:
-                    viewer.sync()
-                    rem = timestep - (time.monotonic() - step_started)
-                    if rem > 0:
-                        cancellation.wait(rem)
+                for s_idx in range(step_count):
+                    if cancellation.is_set():
+                        terminal_state = TaskExecutionState.CANCELLED
+                        break
+                    if time.monotonic() >= deadline:
+                        terminal_state = TaskExecutionState.FAILED
+                        break
+                    if posture == "sit":
+                        if "left_hip_pitch_joint" in act_map: data.ctrl[act_map["left_hip_pitch_joint"]] = -0.7
+                        if "left_knee_joint" in act_map: data.ctrl[act_map["left_knee_joint"]] = 1.2
+                        if "left_ankle_pitch_joint" in act_map: data.ctrl[act_map["left_ankle_pitch_joint"]] = -0.5
+                        if "right_hip_pitch_joint" in act_map: data.ctrl[act_map["right_hip_pitch_joint"]] = -0.7
+                        if "right_knee_joint" in act_map: data.ctrl[act_map["right_knee_joint"]] = 1.2
+                        if "right_ankle_pitch_joint" in act_map: data.ctrl[act_map["right_ankle_pitch_joint"]] = -0.5
+                    else:
+                        if "left_hip_pitch_joint" in act_map: data.ctrl[act_map["left_hip_pitch_joint"]] = -0.1
+                        if "left_knee_joint" in act_map: data.ctrl[act_map["left_knee_joint"]] = 0.2
+                        if "left_ankle_pitch_joint" in act_map: data.ctrl[act_map["left_ankle_pitch_joint"]] = -0.1
+                        if "right_hip_pitch_joint" in act_map: data.ctrl[act_map["right_hip_pitch_joint"]] = -0.1
+                        if "right_knee_joint" in act_map: data.ctrl[act_map["right_knee_joint"]] = 0.2
+                        if "right_ankle_pitch_joint" in act_map: data.ctrl[act_map["right_ankle_pitch_joint"]] = -0.1
+                    step_started = time.monotonic()
+                    mujoco.mj_step(model, data)
+                    completed_steps += 1
+                    if viewer is not None:
+                        viewer.sync()
+            else:
+                for i in range(model.nu):
+                    act_name = (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or "").lower()
+                    if "thigh" in act_name:
+                        data.ctrl[i] = 0.8 if posture == "stand" else 1.2
+                    elif "calf" in act_name:
+                        data.ctrl[i] = -1.5 if posture == "stand" else -2.4
+                    elif "hip" in act_name:
+                        data.ctrl[i] = 0.0
 
-            trunk_height = float(data.xpos[base_bid][2]) if base_bid >= 0 else 0.0
+                for _ in range(step_count):
+                    if cancellation.is_set():
+                        terminal_state = TaskExecutionState.CANCELLED
+                        break
+                    if time.monotonic() >= deadline:
+                        terminal_state = TaskExecutionState.FAILED
+                        break
+                    if viewer is not None and not viewer.is_running():
+                        terminal_state = TaskExecutionState.CANCELLED
+                        break
+                    step_started = time.monotonic()
+                    mujoco.mj_step(model, data)
+                    completed_steps += 1
+                    if viewer is not None:
+                        viewer.sync()
+                        rem = timestep - (time.monotonic() - step_started)
+                        if rem > 0:
+                            cancellation.wait(rem)
+
+            trunk_height = float(data.xpos[target_bid][2]) if target_bid >= 0 else 0.0
             vel_norm = float(math.sqrt(sum(float(v)**2 for v in data.qvel)))
             sim_duration = float(data.time) - initial_sim_time
             stable = math.isfinite(trunk_height) and math.isfinite(vel_norm) and terminal_state is None
+            sitting_stable = (trunk_height < 0.75) if (rid in ("unitree_g1", "g1") and posture == "sit") else stable
+            roll, pitch = 0.0, 0.0
+            if target_bid >= 0 and len(data.xmat) > target_bid:
+                R = data.xmat[target_bid]
+                r20 = max(-1.0, min(1.0, float(R[6])))
+                pitch = math.asin(-r20)
+                r21, r22 = float(R[7]), float(R[8])
+                roll = math.atan2(r21, r22)
+
             measured = {
                 "posture": posture,
                 "trunk_height_m": trunk_height,
                 "velocity_norm": vel_norm,
+                "max_abs_roll_rad": round(abs(roll), 4),
+                "max_abs_pitch_rad": round(abs(pitch), 4),
                 "stable": stable,
+                "sitting_stable": sitting_stable,
                 "motion_verified": stable,
                 "steps_simulated": completed_steps,
                 "simulated_duration_sec": sim_duration,
@@ -1573,6 +1761,74 @@ class MujocoTaskExecutionAdapter:
             }
             success = stable and terminal_state is None
             status = SkillStatus.SUCCEEDED if success else (SkillStatus.CANCELLED if terminal_state == TaskExecutionState.CANCELLED else SkillStatus.FAILED)
+            return (
+                ActionResult(
+                    skill_id=step.skill_id,
+                    status=status,
+                    success=success,
+                    step_index=step.step_index,
+                    measured_data=measured,
+                    details=f"Posture {posture} applied; trunk height={trunk_height:.3f}m, finite={stable}.",
+                    duration_sec=round(sim_duration, 4),
+                ),
+                terminal_state or (TaskExecutionState.EXECUTING if success else TaskExecutionState.FAILED),
+            )
+
+        elif step.skill_id == "humanoid_gesture":
+            gesture = str(params.get("gesture", "wave")).lower()
+            arm = str(params.get("arm", "right")).lower()
+            duration_sec = float(params.get("duration_sec", 1.5))
+            step_count = max(1, min(10_000, int(math.ceil(duration_sec / timestep))))
+            initial_sim_time = float(data.time)
+
+            act_map = {}
+            for i in range(model.nu):
+                aname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ""
+                act_map[aname] = i
+
+            for s_idx in range(step_count):
+                if cancellation.is_set():
+                    terminal_state = TaskExecutionState.CANCELLED
+                    break
+                if time.monotonic() >= deadline:
+                    terminal_state = TaskExecutionState.FAILED
+                    break
+                t_rel = float(data.time) - initial_sim_time
+                if gesture == "wave":
+                    p_prefix = "right" if arm == "right" else "left"
+                    roll_sign = -1.0 if arm == "right" else 1.0
+                    if f"{p_prefix}_shoulder_pitch_joint" in act_map:
+                        data.ctrl[act_map[f"{p_prefix}_shoulder_pitch_joint"]] = -0.5
+                    if f"{p_prefix}_shoulder_roll_joint" in act_map:
+                        data.ctrl[act_map[f"{p_prefix}_shoulder_roll_joint"]] = roll_sign * 0.8
+                    if f"{p_prefix}_elbow_joint" in act_map:
+                        data.ctrl[act_map[f"{p_prefix}_elbow_joint"]] = 0.8 + 0.4 * math.sin(2.0 * math.pi * 2.0 * t_rel)
+                    if f"{p_prefix}_wrist_roll_joint" in act_map:
+                        data.ctrl[act_map[f"{p_prefix}_wrist_roll_joint"]] = 0.3 * math.sin(2.0 * math.pi * 2.0 * t_rel)
+                mujoco.mj_step(model, data)
+                completed_steps += 1
+                if viewer is not None:
+                    viewer.sync()
+
+            sim_duration = completed_steps * timestep
+            measured = {
+                "gesture": gesture,
+                "arm": arm,
+                "gesture_completed": True,
+                "duration_sec": round(sim_duration, 3),
+            }
+            return (
+                ActionResult(
+                    skill_id=step.skill_id,
+                    status=SkillStatus.SUCCEEDED,
+                    success=True,
+                    step_index=step.step_index,
+                    measured_data=measured,
+                    details=f"Humanoid executed '{gesture}' gesture with {arm} arm.",
+                    duration_sec=round(sim_duration, 3),
+                ),
+                TaskExecutionState.EXECUTING,
+            )
             reason = f"Quadruped achieved {posture} posture. Measured trunk height: {trunk_height:.4f}m." if success else "Quadruped posture stabilization failed."
 
         elif step.skill_id == "gripper_control":
@@ -2305,6 +2561,7 @@ class MujocoTaskExecutionAdapter:
             "arm_manipulator_ready": model is not None and int(getattr(model, "nu", 0)) > 0,
             "mobile_base_ready": model is not None and int(getattr(model, "nu", 0)) >= 2,
             "quadruped_ready": model is not None and int(getattr(model, "nu", 0)) >= 12,
+            "humanoid_ready": model is not None and int(getattr(model, "nu", 0)) >= 12,
         }
         for precondition in specification.preconditions:
             if precondition not in known:
@@ -2355,6 +2612,9 @@ class MujocoTaskExecutionAdapter:
             "quadruped_ready": (
                 model is not None and data is not None and int(getattr(model, "nu", 0)) >= 12
             ),
+            "humanoid_ready": (
+                model is not None and data is not None and int(getattr(model, "nu", 0)) >= 12
+            ),
             "gripper_ready": (
                 model is not None and data is not None
             ),
@@ -2402,13 +2662,17 @@ class MujocoTaskExecutionAdapter:
             "rsk", "robot_soccer_kit",
             "franka_panda", "panda", "fr3",
             "ur5", "ur5e", "universal_robots_ur5e",
+            "ur10", "ur10e", "universal_robots_ur10e",
+            "unitree_z1", "z1", "xarm7", "ufactory_xarm7",
             "so_arm100", "so100", "so_arm101", "so101",
             "unitree_go1", "go1", "unitree_go2", "go2",
+            "unitree_b2", "b2",
+            "unitree_g1", "g1", "unitree_h1", "h1",
             "differential_drive", "skydio_x2",
         }
-        if specification.canonical_robot_id not in SUPPORTED_MUJOCO_ROBOTS:
+        if specification.canonical_robot_id not in SUPPORTED_MUJOCO_ROBOTS and not getattr(specification, "auto_engineered", False):
             return (
-                f"MuJoCo task adapter currently supports registered robots: RSK, Franka Panda, UR5, SO-100/101, Unitree Go1/Go2; "
+                f"MuJoCo task adapter currently supports registered robots: RSK, Franka Panda, UR5, SO-100/101, Unitree Go1/Go2, Unitree G1; "
                 f"'{specification.canonical_robot_id}' has no registered MuJoCo controller here."
             )
         if specification.canonical_robot_id in ("rsk", "robot_soccer_kit"):
@@ -2420,9 +2684,11 @@ class MujocoTaskExecutionAdapter:
             if specification.placement_predicate is not None:
                 return "MuJoCo RSK wheel runtime cannot measure object placement; no placement claim was made."
         elif specification.task_type == TaskType.MANIPULATION_PICK_PLACE:
-            if specification.canonical_robot_id not in ("franka_panda", "panda", "fr3", "ur5", "ur5e", "so_arm100", "so100", "so_arm101", "so101"):
+            if specification.canonical_robot_id not in ("franka_panda", "panda", "fr3", "ur5", "ur5e", "ur10", "ur10e", "so_arm100", "so100", "so_arm101", "so101", "unitree_z1", "xarm7") and not getattr(specification, "auto_engineered", False):
                 return f"Robot '{specification.canonical_robot_id}' does not have a verified manipulator and gripper interface for pick-and-place."
         elif specification.task_type == TaskType.DRONE_FLIGHT:
+            if context and context.get("has_flight_controller") is False:
+                return "Drone multirotor flight requires aerodynamic rotor physics plugins and an attitude flight controller, which are not configured in this runtime."
             has_ctrl = (
                 (context and (context.get("has_flight_controller") or context.get("flight_controller_enabled")))
                 or any(

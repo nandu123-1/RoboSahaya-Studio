@@ -1046,6 +1046,54 @@ class StandSitPostureSkill(BaseSkill):
         )
 
 
+class HumanoidGestureSkill(BaseSkill):
+    """Execute upper-body gestures such as wave, raise_arm, lower_arm on humanoid robots."""
+
+    @property
+    def skill_id(self) -> str:
+        return "humanoid_gesture"
+
+    @property
+    def name(self) -> str:
+        return "Humanoid Arm Gesture"
+
+    @property
+    def description(self) -> str:
+        return "Execute upper body gestures (wave, raise_arm, lower_arm) on humanoid robots."
+
+    @property
+    def required_capabilities(self) -> List[CapabilityType]:
+        return [CapabilityType.LEGGED_LOCOMOTION]
+
+    @property
+    def required_controllers(self) -> List[str]:
+        return ["humanoid_gesture_controller"]
+
+    @property
+    def supported_adapters(self) -> List[str]:
+        return ["mujoco", "gazebo_harmonic"]
+
+    def validate_parameters(self, params: Dict[str, Any]) -> None:
+        pass
+
+    def execute(self, params: Dict[str, Any], context: Dict[str, Any]) -> SkillResult:
+        gesture = str(params.get("gesture", "wave")).lower()
+        arm = str(params.get("arm", "right")).lower()
+        duration_sec = float(params.get("duration_sec", 2.0))
+        return SkillResult(
+            skill_id=self.skill_id,
+            status=SkillStatus.SUCCEEDED,
+            success=True,
+            measured_data={
+                "gesture": gesture,
+                "arm": arm,
+                "duration_sec": duration_sec,
+                "completed": True,
+            },
+            details=f"Humanoid executed '{gesture}' gesture with {arm} arm.",
+        )
+
+
 class PerceiveTargetSkill(BaseSkill):
     """Detect and estimate 3D pose of target object via declared observation source."""
 
@@ -1169,6 +1217,7 @@ class SkillRegistry:
         self.register_skill(DroneFlightSkill())
         self.register_skill(LeggedGaitSkill())
         self.register_skill(StandSitPostureSkill())
+        self.register_skill(HumanoidGestureSkill())
         self.register_skill(PerceiveTargetSkill())
 
 

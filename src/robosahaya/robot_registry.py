@@ -86,10 +86,48 @@ class RobotRegistry:
             if norm_alias and norm_alias not in self._alias_map:
                 self._alias_map[norm_alias] = model.id
 
+    def _ensure_catalogue_populated(self) -> None:
+        if getattr(self, "_catalogue_populated", False):
+            return
+        self._catalogue_populated = True
+        try:
+            from robosahaya.robot_catalog import RobotModelCatalog
+            cat = RobotModelCatalog()
+            for m in cat.list_models():
+                if m.id not in self._models:
+                    fam = m.family or "other"
+                    is_mujoco = m.id in ("rsk", "unitree_g1", "unitree_h1", "unitree_go1", "unitree_go2") or any(k in fam.lower() for k in ("humanoid", "quadruped", "aerial", "drone"))
+                    sim_def = "mujoco" if is_mujoco else "gazebo_harmonic"
+                    reg_m = RobotModel(
+                        id=m.id,
+                        display_name=m.display_name,
+                        family=fam,
+                        aliases=m.aliases,
+                        description_module=m.description_module,
+                        formats=m.formats,
+                        license=m.license,
+                        runtime_template_id=m.runtime_template_id,
+                        runtime_status=m.runtime_status,
+                        notes=m.notes,
+                        default_simulator=sim_def,
+                        simulator_support=(sim_def,),
+                        support_status=m.runtime_status,
+                        controllers=(),
+                        sensors=(),
+                        compatible_worlds=("obstacle_world", "tabletop_world"),
+                        required_dependencies=(),
+                        verification_evidence={},
+                        known_limitations="",
+                    )
+                    self.register_model(reg_m)
+        except Exception:
+            pass
+
     def get_model(self, identifier_or_alias: str) -> Optional[RobotModel]:
         """Look up by canonical ID or registered alias."""
         if not identifier_or_alias:
             return None
+        self._ensure_catalogue_populated()
         # Direct lookup by ID
         if identifier_or_alias in self._models:
             return self._models[identifier_or_alias]
@@ -112,6 +150,7 @@ class RobotRegistry:
         return None
 
     def list_models(self, family: str = "All") -> List[RobotModel]:
+        self._ensure_catalogue_populated()
         models = list(self._models.values())
         if family and family != "All":
             models = [m for m in models if m.family.lower() == family.lower()]
@@ -297,6 +336,44 @@ class RobotRegistry:
             simulator_support=("mujoco", "gazebo_harmonic"),
             notes="Quadruped robot with verified MuJoCo rhythmic locomotion gait.",
         ))
+
+        # 10. Unitree G1 Humanoid
+        self.register_model(RobotModel(
+            id="unitree_g1",
+            display_name="Unitree G1 Humanoid",
+            family="humanoid/biped",
+            aliases=("unitree g1", "g1", "g1 humanoid", "g1 robot", "unitree_g1"),
+            description_module="g1_description",
+            formats=("URDF", "MJCF"),
+            license="BSD-3-Clause",
+            runtime_status="runtime_ready",
+            support_status="simulation_ready",
+            default_simulator="mujoco",
+            simulator_support=("mujoco", "gazebo_harmonic"),
+            controllers=("humanoid_locomotion_controller", "standing_balance_controller"),
+            sensors=("joint_encoders", "imu"),
+            notes="Unitree G1 49-actuator bipedal humanoid with verified MuJoCo simulation.",
+        ))
+
+        # 11. Unitree H1 Humanoid
+        self.register_model(RobotModel(
+            id="unitree_h1",
+            display_name="Unitree H1 Humanoid",
+            family="humanoid/biped",
+            aliases=("unitree h1", "h1", "h1 humanoid", "h1 robot", "unitree_h1"),
+            description_module="h1_description",
+            formats=("URDF", "MJCF"),
+            license="BSD-3-Clause",
+            runtime_status="runtime_ready",
+            support_status="simulation_ready",
+            default_simulator="mujoco",
+            simulator_support=("mujoco", "gazebo_harmonic"),
+            controllers=("humanoid_locomotion_controller", "standing_balance_controller"),
+            sensors=("joint_encoders", "imu"),
+            notes="Unitree H1 full-size humanoid with verified MuJoCo simulation.",
+        ))
+
+
 
 
 # Global Singleton Registry
